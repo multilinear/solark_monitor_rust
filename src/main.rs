@@ -11,15 +11,6 @@ pub type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 //**************************** Solark (modbus) *******************************
 
 #[derive(Debug)]
-enum RegDataType {
-    Bool,
-    Bool64Bit, // Used to read the fault code and see if it's nonzero
-    Watts,
-    Percent,
-    Hz,
-}
-
-#[derive(Debug)]
 enum RegData {
     Bool(bool),
     Watts(i16),
@@ -28,27 +19,43 @@ enum RegData {
 }
 
 #[derive(Debug)]
-struct SolarkReg<'a> {
-  name: &'a str, // What to call the data
+struct SolarkDatum {
+  name: String,
+  value: RegData,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+enum RegDataType {
+    Bool,
+    Bool64Bit, // Used to read the fault code and see if it's nonzero
+    Watts,
+    Percent,
+    Hz,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct SolarkReg {
+  name: String, // What to call the data
   addr: u16, // Address of the register
   datatype: RegDataType, // How to store the final data
 }
 
-#[derive(Debug)]
-struct SolarkDatum<'a> {
-  name: &'a str,
-  value: RegData,
+#[derive(Debug, Deserialize, Clone)]
+struct SolarkSettings {
+  port: String,
+  slave_id: u8,
+  registers: Vec<SolarkReg>,
 }
 
 #[derive(Debug)]
-struct Solark<'a> {
+struct Solark {
   serial: String,
-	port: &'a str, 
-	slave_id: i8,
+  cfg: SolarkSettings,
 	ctx: tokio_modbus::client::Context,
 }	
 
-const SOLARK_REGISTERS : [SolarkReg<'static>; 9] = [
+/*
+const SOLARK_REGISTERS : [SolarkReg; 9] = [
     SolarkReg{
         name: "Faults",
         addr: 103,
@@ -95,16 +102,15 @@ const SOLARK_REGISTERS : [SolarkReg<'static>; 9] = [
         datatype: RegDataType::Hz,
     },
 ];
+*/
 
-impl Solark<'_> {
-	pub async fn connect() -> Result<Solark<'static>> {
+impl Solark {
+	pub async fn connect(cfg: &SolarkSettings) -> Result<Solark> {
     use tokio_modbus::prelude::*;
     // connect
-		let port_str = "/dev/ttyUSB0";
-		let slave_id = 0x1;
-    let slave = Slave(slave_id); // Solark modbus ID
+    let slave = Slave(cfg.slave_id); // Solark modbus ID
 
-    let builder = tokio_serial::new(port_str, 9600);
+    let builder = tokio_serial::new(&cfg.port, 9600);
     let port = tokio_serial::SerialStream::open(&builder).unwrap();
 
     let mut ctx = rtu::attach_slave(port, slave);
@@ -117,20 +123,19 @@ impl Solark<'_> {
         serial.push(nibble as u8 as char); 
     }
     return Ok(Solark{
+        cfg: cfg.clone(),
         serial,
-        port: port_str,
-        slave_id: 0x1,
         ctx: ctx,
       });
 	}
 
-	pub async fn read_register(&mut self, reg: &SolarkReg<'_>) -> Result<RegData> {
+	pub async fn read_register(ctx: &mut tokio_modbus::client::Context, reg: &SolarkReg) -> Result<RegData> {
     use tokio_modbus::prelude::*;
     let count = match reg.datatype {
             RegDataType::Bool64Bit => 4,
             _ => 1,
         };
-    let v = self.ctx.read_holding_registers(reg.addr, count).await??;
+    let v = ctx.read_holding_registers(reg.addr, count).await??;
     Ok(match reg.datatype {
         RegDataType::Bool64Bit => RegData::Bool(v[0] | v[1] | v[2] | v[3] != 0),
         RegDataType::Bool => RegData::Bool(v[0] != 0),
@@ -151,11 +156,11 @@ impl Solark<'_> {
     // Sadly we can't parallelize this because self has to be borrowed as mutable
     // It's probably good though, since that would be a threadsafety problem
     // We can still do non-modbus stuff, like talk to influxdb, while awaiting
-    for reg in SOLARK_REGISTERS {
-        let data = self.read_register(&reg).await?;
+    for reg in &self.cfg.registers {
+        let data = Solark::read_register(&mut self.ctx, &reg).await?;
         results.push(
             SolarkDatum{
-                name: reg.name,
+                name: reg.name.clone(), // TODO: get rid of this string copy
                 value: data,
             });
     }
@@ -164,15 +169,15 @@ impl Solark<'_> {
 
 	pub async fn disconnect(&mut self) -> Result<()> {
 	  println!("Disconnecting");
-    self.ctx.disconnect().await?;
-		Ok(())
+    self.ctx.disconnect().await??;
+    Ok(())
 	}
 }
 
 //***************************** Influx **********************************
 
 #[derive(Debug, Deserialize)]
-struct InfluxCfg {
+struct InfluxSettings {
     token: String,
     bucket: String,
     org: String,
@@ -185,7 +190,7 @@ struct Influx {
 }
 
 impl Influx {
-    async fn connect(cfg: &InfluxCfg) -> Result<Influx> {
+    async fn connect(cfg: &InfluxSettings) -> Result<Influx> {
         use influxdb2::Client;
         let client = Client::new(&cfg.url, &cfg.org, &cfg.token);
         Ok(Influx{
@@ -193,12 +198,12 @@ impl Influx {
             client: client,
         })
     }
-    async fn write_point(&mut self, data: &Vec<SolarkDatum<'_>>) -> Result<()> {
+    async fn write_point(&mut self, data: &Vec<SolarkDatum>) -> Result<()> {
         use influxdb2::models::DataPoint;
         let mut points = Vec::new();
-        let timestamp = chrono::Utc::now().timestamp_nanos();
+        let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
         for datum in data {
-            let point = DataPoint::builder(datum.name);
+            let point = DataPoint::builder(&datum.name);
             points.push(match datum.value {
                 RegData::Bool(v) => 
                     point.tag("units", "Bool")
@@ -223,7 +228,7 @@ impl Influx {
 
 //***************************** Main ************************************
 
-async fn run_loop(solark: &mut Solark<'_>, influx: &mut Influx) -> Result<()> {
+async fn run_loop(solark: &mut Solark, influx: &mut Influx) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     loop {
         println!("");
@@ -253,7 +258,8 @@ impl std::error::Error for MyError {
 
 #[derive(Debug, Deserialize)]
 struct Settings {
-    influxdb: InfluxCfg, 
+    influxdb: InfluxSettings, 
+    solark: SolarkSettings,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -267,7 +273,7 @@ async fn main() -> Result<()> {
     let settings : Settings = cfg.try_deserialize()?;
     println!("config is {settings:?}");
 
-		let mut solark = Solark::connect().await?;
+		let mut solark = Solark::connect(&settings.solark).await?;
     let mut influx = Influx::connect(&settings.influxdb).await?;
     println!("connected to {solark:?}");
     // We put this in a seperate function to simplify error propogation
