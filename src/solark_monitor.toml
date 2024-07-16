@@ -1,0 +1,20 @@
+[influxdb]
+token = "<your token here>"
+bucket = "<your bucket here>"
+url = "http://localhost:8083"
+org = "<your org here>"
+
+[solark]
+port = "/dev/ttyUSB0"
+slave_id = 1
+registers = [
+  { name = "Faults", addr = 103, datatype = "Bool64Bit" },
+  { name = "Gen Watts", addr = 165, datatype = "Watts" },
+  { name = "Grid Watts", addr = 169, datatype = "Watts" },
+  { name = "Inv Watts", addr = 175, datatype = "Watts" },
+  { name = "Load Watts", addr = 178, datatype = "Watts" },
+  { name = "Batt SOC", addr = 184, datatype = "Percent" },
+  { name = "Batt Watts", addr = 190, datatype = "Watts" },
+  { name = "Grid Live", addr = 194, datatype = "Bool" },
+  { name = "Gen Freq", addr = 194, datatype = "Hz" },
+]
