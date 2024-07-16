@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies]
 tokio = {version="1.3.8", features=["rt-multi-thread"]}
-tokio-modbus = {version="0.13.1", default-features=false, features=["rtu"]}
+#tokio-modbus = {version="0.13.1", default-features=false, features=["rtu"]}
+tokio-modbus = {version="*", default-features=false, features=["rtu"]}
 tokio-serial = "5.4.4"
 influxdb2 = "0.5.1"
 matrix-sdk = { path = "../matrix-rust-sdk/crates/matrix-sdk" }
