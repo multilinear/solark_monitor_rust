@@ -7,6 +7,12 @@ org = "<your org here>"
 [solark]
 port = "/dev/ttyUSB0"
 slave_id = 1
+# Encodes what registers to read from.
+# These  will also be written to influxDB with the
+# configured names and types. Bool64Bit is special
+# and is true/false based on whether any of 64 bits are set
+# other types impact whether 16-bit values are treated as
+# signed, and are added as tags to the influx data.
 registers = [
   { name = "Faults", addr = 103, datatype = "Bool64Bit" },
   { name = "Gen Watts", addr = 165, datatype = "Watts" },
@@ -18,3 +24,14 @@ registers = [
   { name = "Grid Live", addr = 194, datatype = "Bool" },
   { name = "Gen Freq", addr = 194, datatype = "Hz" },
 ]
+
+[alerting]
+alerts = [
+  { metric = "Faults", msg = "Solark has Faults Go Check the screen", check = "=1" },
+  { metric = "Grid Live", msg = "Grid is down running on battery power", check = "=0" },
+  { metric = "Batt SOC", msg = "Battery is below 10%", check = "<10" },
+  { metrics = "Batt SOC", msg = "Battery is below 20%", check = "<20" }
+]
+
+# in minutes
+alert_timeout = 8540
