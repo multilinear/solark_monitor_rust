@@ -13,4 +13,6 @@ tokio-serial = "5.4.4"
 influxdb2 = "0.5.1"
 matrix-sdk = { path = "../matrix-rust-sdk/crates/matrix-sdk" }
 futures = "0.3.30"
-
+config = {version="*" , default_features=false, features=["async", "toml"]}
+serde = "*"
+chrono = "*"

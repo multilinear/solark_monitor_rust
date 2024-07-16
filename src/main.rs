@@ -1,7 +1,12 @@
 use tokio;
 use std::time::Duration;
+use std::fmt;
+use serde::Deserialize;
 
 pub type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
+
+// *************************** Config ***************************************
+
 
 //**************************** Solark (modbus) *******************************
 
@@ -107,8 +112,9 @@ impl Solark<'_> {
     let rsp = ctx.read_holding_registers(3, 5).await??;
     let mut serial = String::with_capacity(10);
     for nibble in rsp {
-       serial.push(((nibble&(255<<8))>>8) as u8 as char); 
-       serial.push((nibble&255) as u8 as char); 
+        // as u8 takes the bottom byte
+        serial.push((nibble>>8) as u8 as char); 
+        serial.push(nibble as u8 as char); 
     }
     return Ok(Solark{
         serial,
@@ -124,7 +130,6 @@ impl Solark<'_> {
             RegDataType::Bool64Bit => 4,
             _ => 1,
         };
-    println!("Reading the holding registers {reg:?}");
     let v = self.ctx.read_holding_registers(reg.addr, count).await??;
     Ok(match reg.datatype {
         RegDataType::Bool64Bit => RegData::Bool(v[0] | v[1] | v[2] | v[3] != 0),
@@ -132,12 +137,7 @@ impl Solark<'_> {
         RegDataType::Watts => RegData::Watts(
             // massage into a signed value
             if v[0] > (1<<(16-1))-1 {
-                // If this were one byte, then we'd subtract 128
-                // then convert to signed
-                // then subtract 128 again
-                // This avoids overflow, and we can see 255 becomes
-                // -1, and 254 becomes -2 as it should.
-                (v[0] - (1<<(16-1))) as i16 - (1<<(16-1))
+                (v[0] as i32 - (1<<16)) as i16
             } else {
                 v[0] as i16
             }),
@@ -147,7 +147,6 @@ impl Solark<'_> {
 	}
 
   pub async fn read_all(&mut self) -> Result<Vec<SolarkDatum>> {
-    println!("Reading all");
     let mut results = Vec::new();
     // Sadly we can't parallelize this because self has to be borrowed as mutable
     // It's probably good though, since that would be a threadsafety problem
@@ -172,28 +171,32 @@ impl Solark<'_> {
 
 //***************************** Influx **********************************
 
-struct Influx<'a> {
-    url: &'a str,
-    bucket: &'a str,
+#[derive(Debug, Deserialize)]
+struct InfluxCfg {
+    token: String,
+    bucket: String,
+    org: String,
+    url: String,
+}
+
+struct Influx {
+    bucket: String,
     client: influxdb2::Client,
 }
 
-impl Influx<'_> {
-    async fn connect() -> Result<Influx<'static>> {
+impl Influx {
+    async fn connect(cfg: &InfluxCfg) -> Result<Influx> {
         use influxdb2::Client;
-        let url = "http://localhost:8083";
-        let org = "smalladventures";
-        let token = "";
-        let client = Client::new(url, org, token);
+        let client = Client::new(&cfg.url, &cfg.org, &cfg.token);
         Ok(Influx{
-            url: url,
-            bucket: "power",
+            bucket: cfg.bucket.clone(),
             client: client,
         })
     }
     async fn write_point(&mut self, data: &Vec<SolarkDatum<'_>>) -> Result<()> {
         use influxdb2::models::DataPoint;
         let mut points = Vec::new();
+        let timestamp = chrono::Utc::now().timestamp_nanos();
         for datum in data {
             let point = DataPoint::builder(datum.name);
             points.push(match datum.value {
@@ -209,19 +212,21 @@ impl Influx<'_> {
                 RegData::Hz(v) =>
                     point.tag("units", "Hz")
                     .field("value", v as i64),
-            }.build()?);
+            }.tag("solark", "1") .timestamp(timestamp).build()?);
         }
+        println!("writing points {points:?}");
         // TODO: We could avoid building the whole point list first
-        self.client.write(self.bucket, futures::stream::iter(points)).await?;
+        self.client.write(&self.bucket, futures::stream::iter(points)).await?;
         Ok(())
     }
 }
 
 //***************************** Main ************************************
 
-async fn run_loop(solark: &mut Solark<'_>, influx: &mut Influx<'_>) -> Result<()> {
+async fn run_loop(solark: &mut Solark<'_>, influx: &mut Influx) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     loop {
+        println!("");
         interval.tick().await;
         let values = solark.read_all().await?;
         println!("values = {values:?}");
@@ -233,11 +238,37 @@ async fn run_loop(solark: &mut Solark<'_>, influx: &mut Influx<'_>) -> Result<()
     }
 }
 
+#[derive(Debug)]
+struct MyError;
+impl fmt::Display for MyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Parse error")
+    }
+}
+impl std::error::Error for MyError {
+    fn description(&self) -> &str {
+        return "This is a parse error";
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Settings {
+    influxdb: InfluxCfg, 
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let cfgpath = "/etc/solark_monitor.toml";
+    println!("Reading config file {cfgpath}");
+    let cfg = config::Config::builder()
+        .add_source(config::File::new(cfgpath, config::FileFormat::Toml))
+        .build()?;
+    println!("deserializing");
+    let settings : Settings = cfg.try_deserialize()?;
+    println!("config is {settings:?}");
+
 		let mut solark = Solark::connect().await?;
-    let mut influx = Influx::connect().await?;
+    let mut influx = Influx::connect(&settings.influxdb).await?;
     println!("connected to {solark:?}");
     // We put this in a seperate function to simplify error propogation
     // This way it's easy to disconnect on error
