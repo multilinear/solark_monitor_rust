@@ -212,7 +212,7 @@ impl Influx {
                 RegData::Hz(v) =>
                     point.tag("units", "Hz")
                     .field("value", v as i64),
-            }.tag("solark", "1") .timestamp(timestamp).build()?);
+            }.tag("Solark", "1") .timestamp(timestamp).build()?);
         }
         println!("writing points {points:?}");
         // TODO: We could avoid building the whole point list first
