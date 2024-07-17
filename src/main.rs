@@ -42,6 +42,7 @@ struct SolarkReg {
 
 #[derive(Debug, Deserialize, Clone)]
 struct SolarkSettings {
+  poll_secs: u32,
   port: String,
   slave_id: u8,
   registers: Vec<SolarkReg>,
@@ -53,56 +54,6 @@ struct Solark {
   cfg: SolarkSettings,
 	ctx: tokio_modbus::client::Context,
 }	
-
-/*
-const SOLARK_REGISTERS : [SolarkReg; 9] = [
-    SolarkReg{
-        name: "Faults",
-        addr: 103,
-        datatype: RegDataType::Bool64Bit,
-    },
-    SolarkReg{
-        name: "Gen Watts",
-        addr: 166,
-        datatype: RegDataType::Watts,
-    },
-    SolarkReg{
-        name: "Grid Watts",
-        addr: 169,
-        datatype: RegDataType::Watts,
-    },
-    SolarkReg{
-        name: "Inv Watts",
-        addr: 175,
-        datatype: RegDataType::Watts,
-    },
-    SolarkReg{
-        name: "Load Watts",
-        addr: 178,
-        datatype: RegDataType::Watts,
-    },
-    SolarkReg{
-        name: "Batt SOC",
-        addr: 184,
-        datatype: RegDataType::Percent,
-    },
-    SolarkReg{
-        name: "Batt Watts",
-        addr: 190,
-        datatype: RegDataType::Watts,
-    },
-    SolarkReg{
-        name: "Grid Live",
-        addr: 194,
-        datatype: RegDataType::Bool,
-    },
-    SolarkReg{
-        name: "Gen Freq",
-        addr: 196,
-        datatype: RegDataType::Hz,
-    },
-];
-*/
 
 impl Solark {
 	pub async fn connect(cfg: &SolarkSettings) -> Result<Solark> {
@@ -176,16 +127,27 @@ impl Solark {
 
 //***************************** Influx **********************************
 
-#[derive(Debug, Deserialize)]
+// This is a workaround.
+// ideally we'd just use a HashMap<String,String>, but
+// the config crate case squashes keys. Doing it this way
+// makes the tag a value, rather than a key.
+#[derive(Debug, Deserialize, Clone)]
+struct SettingsPair {
+    tag: String,
+    tagval: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 struct InfluxSettings {
     token: String,
     bucket: String,
     org: String,
     url: String,
+    tags: Vec<SettingsPair>,
 }
 
 struct Influx {
-    bucket: String,
+    cfg: InfluxSettings,
     client: influxdb2::Client,
 }
 
@@ -194,7 +156,7 @@ impl Influx {
         use influxdb2::Client;
         let client = Client::new(&cfg.url, &cfg.org, &cfg.token);
         Ok(Influx{
-            bucket: cfg.bucket.clone(),
+            cfg: cfg.clone(),
             client: client,
         })
     }
@@ -202,26 +164,32 @@ impl Influx {
         use influxdb2::models::DataPoint;
         let mut points = Vec::new();
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+        println!("tags to add {0:?}", self.cfg.tags);
         for datum in data {
             let point = DataPoint::builder(&datum.name);
-            points.push(match datum.value {
-                RegData::Bool(v) => 
-                    point.tag("units", "Bool")
-                    .field("value", if v {1} else {0}),
-                RegData::Watts(v) =>
-                    point.tag("units", "Watts")
-                    .field("value", v as i64),
-                RegData::Percent(v) =>
-                    point.tag("units", "Percent")
-                    .field("value", v as i64),
-                RegData::Hz(v) =>
-                    point.tag("units", "Hz")
-                    .field("value", v as i64),
-            }.tag("Solark", "1") .timestamp(timestamp).build()?);
+            points.push(
+                self.cfg.tags.iter().fold(
+                    match datum.value {
+                        RegData::Bool(v) => 
+                            point.tag("units", "Bool")
+                            .field("value", if v {1} else {0}),
+                        RegData::Watts(v) =>
+                            point.tag("units", "Watts")
+                            .field("value", v as i64),
+                        RegData::Percent(v) =>
+                            point.tag("units", "Percent")
+                            .field("value", v as i64),
+                        RegData::Hz(v) =>
+                            point.tag("units", "Hz")
+                            .field("value", v as i64),
+                    }.timestamp(timestamp),
+                    |point, tag| point.tag(&tag.tag, &tag.tagval)
+                ).build()?
+            );
         }
         println!("writing points {points:?}");
         // TODO: We could avoid building the whole point list first
-        self.client.write(&self.bucket, futures::stream::iter(points)).await?;
+        self.client.write(&self.cfg.bucket, futures::stream::iter(points)).await?;
         Ok(())
     }
 }
@@ -229,7 +197,7 @@ impl Influx {
 //***************************** Main ************************************
 
 async fn run_loop(solark: &mut Solark, influx: &mut Influx) -> Result<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
     loop {
         println!("");
         interval.tick().await;
@@ -269,13 +237,13 @@ async fn main() -> Result<()> {
     let cfg = config::Config::builder()
         .add_source(config::File::new(cfgpath, config::FileFormat::Toml))
         .build()?;
-    println!("deserializing");
     let settings : Settings = cfg.try_deserialize()?;
     println!("config is {settings:?}");
-
+    println!();
 		let mut solark = Solark::connect(&settings.solark).await?;
+    println!("connected to Solark Serial# {0:?} on port {1:?}", solark.serial, solark.cfg.port);
     let mut influx = Influx::connect(&settings.influxdb).await?;
-    println!("connected to {solark:?}");
+    println!("connected to InfluxDB at {0:?}", settings.influxdb.url);
     // We put this in a seperate function to simplify error propogation
     // This way it's easy to disconnect on error
     // TODO: we'll want to recover from these errors eventually, e.g. if
