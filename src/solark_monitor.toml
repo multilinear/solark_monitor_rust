@@ -3,10 +3,17 @@ token = "<your token here>"
 bucket = "<your bucket here>"
 url = "http://localhost:8083"
 org = "<your org here>"
+# we use this rather than a "map" because map keys
+# are case squashed in the rust config library we're using
+# using an array of tables here is a workaround
+tags = [ {key="Solark", val="1"} ]
 
 [solark]
 port = "/dev/ttyUSB0"
+# ID of the solark
 slave_id = 1
+# How often to poll
+poll_secs = 10
 # Encodes what registers to read from.
 # These  will also be written to influxDB with the
 # configured names and types. Bool64Bit is special
