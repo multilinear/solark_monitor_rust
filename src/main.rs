@@ -1,6 +1,7 @@
 use tokio;
 use serde::Deserialize;
 use std::time::{SystemTime, Duration};
+use std::collections::BTreeMap;
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -17,7 +18,7 @@ enum RegData {
     Hz(u16),
 }
 
-type SolarkData = std::collections::BTreeMap<String, RegData>;
+type SolarkData = BTreeMap<String, RegData>;
 
 #[derive(Debug, Deserialize, Clone)]
 enum RegDataType {
@@ -276,6 +277,7 @@ struct Alert {
 struct Alerting {
     alerter: Matrix,
     alerts: Vec<Alert>,
+    msgs: BTreeMap<String, SystemTime>,
     alert_timeout: Duration,
 }
 
@@ -313,6 +315,7 @@ impl Alerting {
             alerter: alerter,
             alerts: alerts,
             alert_timeout: Duration::from_secs(cfg.alert_timeout_secs.into()),
+            msgs: BTreeMap::new(),
         })
     }
     async fn check(&mut self, data: &SolarkData) -> Result<()> {
@@ -369,9 +372,28 @@ impl Alerting {
         // before resending
         // Make sure we print even if the alerter is disconnected
         println!("{msg:?}");
+        let tn = SystemTime::now();
+        // Skip if the message has been sent within the timeout
+        match self.msgs.get(msg) {
+            None => (),
+            Some(t) => 
+                if *t > tn + self.alert_timeout { return (); },
+        };
+        self.msgs.insert(msg.to_string(), tn);
         // We're already trying to log an error
         // so we just ignore the failure
         let _ = self.alerter.send(msg).await;
+    }
+    fn gc(&mut self) {
+        let tn = SystemTime::now();
+        let mut todelete = None;
+        for (msg, t) in self.msgs.iter() {
+            if *t > tn + self.alert_timeout {
+                todelete = Some(msg.clone());
+                break;
+            }
+        }
+        todelete.and_then(|x| self.msgs.remove(&x));
     }
     async fn disconnect(&mut self) -> Result<()> {
         self.alerter.disconnect().await?;
@@ -384,42 +406,6 @@ impl Alerting {
 }
 
 //***************************** Main ************************************
-
-async fn run_loop(solark: &mut Solark, influx: &mut Influx, alerting: &mut Alerting) -> Result<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
-    // We need to start out with some values
-    loop {
-        println!("");
-        interval.tick().await;
-        let values = match solark.read_all().await {
-            Ok(v) => v,
-            Err(e) => {
-                alerting.error(&format!("Modbus Error: {e:?}")).await;
-                solark.disconnect().await?;
-                continue;
-            }
-        };
-        println!("values = {values:?}");
-        // Read the next set of values while we process the last set
-        let writef = influx.write_point(&values);
-        let alertingf = alerting.check(&values);
-        let (write_res, alert_res) = tokio::join!(writef, alertingf);
-        match write_res {
-            Ok(_) => (),
-            Err(e) => {
-                alerting.error(&format!("Influx Error: {e:?}")).await;
-                influx.disconnect().await?;
-            }
-        }
-        match alert_res {
-            Ok(_) => (),
-            Err(e) => {
-                alerting.error(&format!("Alerting Error: {e:?}")).await;
-                alerting.disconnect().await?;
-            }
-        }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct Settings {
@@ -456,8 +442,40 @@ async fn main() -> Result<()> {
             Err(e) => alerting.error(&format!("Startup Error: {e:?}")).await,
         };
     }
-    run_loop(&mut solark, &mut influx, &mut alerting).await?;
-    Ok(())
+    let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
+    // We need to start out with some values
+    loop {
+        println!("");
+        interval.tick().await;
+        let values = match solark.read_all().await {
+            Ok(v) => v,
+            Err(e) => {
+                alerting.error(&format!("Modbus Error: {e:?}")).await;
+                solark.disconnect().await?;
+                continue;
+            }
+        };
+        println!("values = {values:?}");
+        // Read the next set of values while we process the last set
+        let writef = influx.write_point(&values);
+        let alertingf = alerting.check(&values);
+        let (write_res, alert_res) = tokio::join!(writef, alertingf);
+        match write_res {
+            Ok(_) => (),
+            Err(e) => {
+                alerting.error(&format!("Influx Error: {e:?}")).await;
+                influx.disconnect().await?;
+            }
+        }
+        match alert_res {
+            Ok(_) => (),
+            Err(e) => {
+                alerting.error(&format!("Alerting Error: {e:?}")).await;
+                alerting.disconnect().await?;
+            }
+        }
+        alerting.gc();
+    }
 }
 
 
