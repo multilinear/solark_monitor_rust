@@ -5,9 +5,6 @@ use std::collections::BTreeMap;
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
-// *************************** Config ***************************************
-
-
 //**************************** Solark (modbus) *******************************
 
 #[derive(Debug)]
@@ -61,10 +58,7 @@ impl Solark {
   }
 
   pub async fn connect(&mut self) -> Result<()> {
-    match self.ctx {
-        Some(_) => return Ok(()),
-        None => (),
-    }
+    if self.ctx.is_some() { return Ok(()); }
     use tokio_modbus::prelude::*;
     // connect
     let slave = Slave(self.cfg.slave_id); // Solark modbus ID
@@ -194,32 +188,30 @@ impl Influx {
         let client = self.client.as_mut().unwrap();
         // Build up the list of points
         use influxdb2::models::DataPoint;
-        let mut points = Vec::new();
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-        for (metric, datum) in data.iter() {
+        let cfg = &self.cfg;
+        // rust thinks cfg could escape scope, so we have to collect
+        // the iterator rather than lazily evaluating.
+        let points: Vec<DataPoint> =  data.iter().map(|(metric, datum)| {
             let point = DataPoint::builder(metric);
-            points.push(
-                self.cfg.tags.iter().fold(
-                    match datum {
-                        RegData::Bool(v) => 
-                            point.tag("units", "Bool")
-                            .field("value", if *v {1} else {0}),
-                        RegData::Watts(v) =>
-                            point.tag("units", "Watts")
-                            .field("value", *v as i64),
-                        RegData::Percent(v) =>
-                            point.tag("units", "Percent")
-                            .field("value", *v as i64),
-                        RegData::Hz(v) =>
-                            point.tag("units", "Hz")
-                            .field("value", *v as i64),
-                    }.timestamp(timestamp),
-                    |point, tag| point.tag(&tag.key, &tag.val)
-                ).build()?
-            );
-        }
-        println!("writing points {points:?}");
-        // TODO: We could avoid building the whole point list first
+            cfg.tags.iter().fold(
+                match datum {
+                    RegData::Bool(v) => 
+                        point.tag("units", "Bool")
+                        .field("value", if *v {1} else {0}),
+                    RegData::Watts(v) =>
+                        point.tag("units", "Watts")
+                        .field("value", *v as i64),
+                    RegData::Percent(v) =>
+                        point.tag("units", "Percent")
+                        .field("value", *v as i64),
+                    RegData::Hz(v) =>
+                        point.tag("units", "Hz")
+                        .field("value", *v as i64),
+                }.timestamp(timestamp),
+                |p, tag| p.tag(&tag.key, &tag.val)
+            ).build().unwrap()
+        }).collect();
         client.write(&self.cfg.bucket, futures::stream::iter(points)).await?;
         Ok(())
     }
@@ -228,29 +220,62 @@ impl Influx {
 //***************************** Matrix **********************************
 #[derive(Debug, Deserialize, Clone)]
 struct MatrixSettings {
+    user: String,
+    passwd: String,
+    server: String,
     // TODO: add some matrix settings
 }
 
 struct Matrix {
     cfg: MatrixSettings,
+    sync_settings: matrix_sdk::config::SyncSettings,
+    client: Option<matrix_sdk::Client>, 
 }
 impl Matrix {
     fn new(cfg: &MatrixSettings) -> Self {
+        use matrix_sdk::config::SyncSettings;
         Matrix{
             cfg: cfg.clone(),
+            client: None,
+            sync_settings: SyncSettings::default(),
         }
     }
     async fn connect(&mut self) -> Result<()> {
-        // TODO write some matrix code
+        println!("connecting to matrix");
+        if self.client.is_some() { return Ok(()); }
+        use matrix_sdk::Client;
+        let client = Client::builder().homeserver_url(&self.cfg.server).build().await?;
+        client.matrix_auth().login_username(&self.cfg.user, &self.cfg.passwd).send().await?;
+        // We can't use Matrix::sync() because that's recursion and
+        // async fns don't like recursion
+        client.sync_once(self.sync_settings.clone()).await?;
+        println!("connected to Matrix {0:?}", self.cfg);
+        self.client = Some(client);
+        Ok(())
+    }
+    async fn sync(&mut self) -> Result<()> {
+        self.connect().await?;
+        let client = self.client.as_mut().unwrap();
+        client.sync_once(self.sync_settings.clone()).await?;
         Ok(())
     }
     async fn disconnect(&mut self) -> Result<()> {
+        self.client = None;
         Ok(())
     }
-    async fn send(&self, msg: &str) -> Result<()> {
-        println!("TODO matrix not implemented msg: {msg:?}");
+    async fn send(&mut self, msg: &str) -> Result<()> {
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        self.connect().await?;
+        let client = self.client.as_mut().unwrap();
+        client.sync_once(self.sync_settings.clone()).await?;
+        let rooms = client.joined_rooms();
+        for room in rooms {
+            let matrix_msg = RoomMessageEventContent::text_plain(msg);
+            room.send(matrix_msg);
+        }
         Ok(())
     }
+    // TODO: we need stuff for accepting chat requests
 }
 
 //***************************** Alerts **********************************
@@ -339,38 +364,34 @@ impl Alerting {
             match ((a.fun)(val), a.fired) {
                 (true, Some(t)) => 
                     if tn > t + self.alert_timeout {
-                        Self::realert(&self.alerter, &a.msg, &a.metric, val).await?
+                        Self::realert(&mut self.alerter, &a.msg, &a.metric, val).await?
                     },
                 (true, None) => { 
                         a.fired = Some(tn);
-                        Self::alert(&self.alerter, &a.msg, &a.metric, val).await?
+                        Self::alert(&mut self.alerter, &a.msg, &a.metric, val).await?
                     },
                 (false, Some(_)) => {
                         a.fired = None;
-                        Self::clear_alert(&self.alerter, &a.msg, &a.metric, val).await?
+                        Self::clear_alert(&mut self.alerter, &a.msg, &a.metric, val).await?
                     },
                 (false, None) => (),
             }
         }
         Ok(()) 
     }
-    async fn alert(alerter: &Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
+    async fn alert(alerter: &mut Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
         alerter.send(&format!("Alert: {msg:?}, {metric:?}={val:?}")).await?;
         Ok(())
     }
-    async fn realert(alerter: &Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
+    async fn realert(alerter: &mut Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
         alerter.send(&format!("Re-Alert: {msg:?}, {metric:?}={val:?}")).await?;
         Ok(())
     }
-    async fn clear_alert(alerter: &Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
+    async fn clear_alert(alerter: &mut Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
         alerter.send(&format!("Alert cleared: {msg:?}, {metric:?}={val:?}")).await?;
         Ok(())
     }
     async fn error(&mut self, msg: &str) -> () {
-        // TODO: this is where we add backoff
-        // maybe store a log of the messages and check against it
-        // before resending
-        // Make sure we print even if the alerter is disconnected
         println!("{msg:?}");
         let tn = SystemTime::now();
         // Skip if the message has been sent within the timeout
@@ -384,6 +405,10 @@ impl Alerting {
         // so we just ignore the failure
         let _ = self.alerter.send(msg).await;
     }
+    // This just helps keep the msgs list small and fast
+    // If for some reason we have an Error with a unique component
+    // this will expire it *eventually* so our memory doesn't grow
+    // unbounded.
     fn gc(&mut self) {
         let tn = SystemTime::now();
         let mut todelete = None;
@@ -443,9 +468,10 @@ async fn main() -> Result<()> {
         };
     }
     let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
+    println!("Starting monitoring loop");
     // We need to start out with some values
     loop {
-        println!("");
+        //println!("");
         interval.tick().await;
         let values = match solark.read_all().await {
             Ok(v) => v,
@@ -455,7 +481,7 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
-        println!("values = {values:?}");
+        //println!("values = {values:?}");
         // Read the next set of values while we process the last set
         let writef = influx.write_point(&values);
         let alertingf = alerting.check(&values);
