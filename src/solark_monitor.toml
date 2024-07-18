@@ -1,13 +1,3 @@
-[influxdb]
-token = "<your token here>"
-bucket = "<your bucket here>"
-url = "http://localhost:8083"
-org = "<your org here>"
-# we use this rather than a "map" because map keys
-# are case squashed in the rust config library we're using
-# using an array of tables here is a workaround
-tags = [ {key="Solark", val="1"} ]
-
 [solark]
 port = "/dev/ttyUSB0"
 # ID of the solark
@@ -32,13 +22,26 @@ registers = [
   { name = "Gen Freq", addr = 194, datatype = "Hz" },
 ]
 
+[influxdb]
+enable = true
+token = "<your token here>"
+bucket = "<your bucket here>"
+url = "http://localhost:8083"
+org = "<your org here>"
+# we use this rather than a "map" because map keys
+# are case squashed in the rust config library we're using
+# using an array of tables here is a workaround
+tags = [ {key="Solark", val="1"} ]
+
 [matrix]
+enable = true
 server = "https://matrix.org"
 user = "<your bot user here>"
 passwd = "<your users' password here>"
 allowed_users = ["<your user>", "<your housemates user>"]
 
 [alerting]
+enable = true
 alerts = [
   { metric = "Faults", msg = "Solark has Faults Go Check the screen", check = "=1" },
   { metric = "Grid Live", msg = "Grid is down running on battery power", check = "=0" },

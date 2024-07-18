@@ -147,6 +147,7 @@ struct SettingsPair {
 
 #[derive(Debug, Deserialize, Clone)]
 struct InfluxSettings {
+    enable: bool,
     token: String,
     bucket: String,
     org: String,
@@ -167,6 +168,7 @@ impl Influx {
         }
     }
     async fn connect(&mut self) -> Result<()> {
+      if !self.cfg.enable { return Ok(()); }
       match self.client {
         Some(_) => Ok(()),
         None =>  {
@@ -184,6 +186,7 @@ impl Influx {
         Ok(())
     }
     async fn write_point(&mut self, data: &SolarkData) -> Result<()> {
+        if !self.cfg.enable { return Ok(()); }
         // Automatically reconnect if we're not connected
         self.connect().await?;
         // connect either created client, or errored out
@@ -223,6 +226,7 @@ impl Influx {
 //***************************** Matrix **********************************
 #[derive(Debug, Deserialize, Clone)]
 struct MatrixSettings {
+    enable: bool,
     user: String,
     passwd: String,
     server: String,
@@ -244,6 +248,7 @@ impl Matrix {
     }
     async fn connect(&mut self) -> Result<()> {
         if self.client.is_some() { return Ok(()); }
+        if !self.cfg.enable { return Ok(()); }
         use matrix_sdk::Client;
         let client = Client::builder().homeserver_url(&self.cfg.server).build().await?;
         client.matrix_auth().login_username(&self.cfg.user, &self.cfg.passwd).send().await?;
@@ -256,6 +261,7 @@ impl Matrix {
         Ok(())
     }
     async fn sync(&mut self) -> Result<()> {
+        if !self.cfg.enable { return Ok(()); }
         self.connect().await?;
         let client = self.client.as_mut().unwrap();
         client.sync_once(self.sync_settings.clone()).await?;
@@ -267,6 +273,7 @@ impl Matrix {
     }
     async fn send(&mut self, msg: &str) -> Result<()> {
         use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        if !self.cfg.enable { return Ok(()); }
         println!("Sending msg {msg:?} via matrix");
         self.connect().await?;
         let client = self.client.as_mut().unwrap();
@@ -292,6 +299,7 @@ struct AlertDesc {
 
 #[derive(Debug, Deserialize, Clone)]
 struct AlertSettings {
+    enable: bool,
     alerts: Vec<AlertDesc>,
     alert_timeout_secs: u32,
 }
@@ -304,6 +312,7 @@ struct Alert {
 }
 
 struct Alerting {
+    enable: bool,
     alerter: Matrix,
     alerts: Vec<Alert>,
     msgs: BTreeMap<String, SystemTime>,
@@ -341,6 +350,7 @@ impl Alerting {
             )
         }
         Ok(Self {
+            enable: cfg.enable,
             alerter: alerter,
             alerts: alerts,
             alert_timeout: Duration::from_secs(cfg.alert_timeout_secs.into()),
@@ -348,6 +358,7 @@ impl Alerting {
         })
     }
     async fn check(&mut self, data: &SolarkData) -> Result<()> {
+        if !self.enable { return Ok(()); }
         let tn = SystemTime::now();
         // We're effectively implementing a very very shitty little
         // DSL here. Possibly we could plug in a rust crate that includes
@@ -368,35 +379,31 @@ impl Alerting {
             match ((a.fun)(val), a.fired) {
                 (true, Some(t)) => 
                     if tn > t + self.alert_timeout {
-                        Self::realert(&mut self.alerter, &a.msg, &a.metric, val).await?
+                        a.fired = Some(tn);
+                        let msg = format!("Realert: {0:?}, {1:?}={val:?}", a.msg, a.metric);
+                        Self::alert(&mut self.alerter, &msg).await?
                     },
                 (true, None) => { 
                         a.fired = Some(tn);
-                        Self::alert(&mut self.alerter, &a.msg, &a.metric, val).await?
+                        let msg = format!("Alert: {0:?}, {1:?}={val:?}", a.msg, a.metric);
+                        Self::alert(&mut self.alerter, &msg).await?
                     },
                 (false, Some(_)) => {
                         a.fired = None;
-                        Self::clear_alert(&mut self.alerter, &a.msg, &a.metric, val).await?
+                        let msg = format!("Alert Cleared: {0:?}, {1:?}={val:?}", a.msg, a.metric);
+                        Self::alert(&mut self.alerter, &msg).await?
                     },
                 (false, None) => (),
             }
         }
         Ok(()) 
     }
-    async fn alert(alerter: &mut Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
-        alerter.send(&format!("Alert: {msg:?}, {metric:?}={val:?}")).await?;
-        Ok(())
-    }
-    async fn realert(alerter: &mut Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
-        alerter.send(&format!("Re-Alert: {msg:?}, {metric:?}={val:?}")).await?;
-        Ok(())
-    }
-    async fn clear_alert(alerter: &mut Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
-        alerter.send(&format!("Alert cleared: {msg:?}, {metric:?}={val:?}")).await?;
+    async fn alert(alerter: &mut Matrix, msg: &str) -> Result<()> {
+        println!("{msg:?}");
+        alerter.send(msg).await?;
         Ok(())
     }
     async fn error(&mut self, msg: &str) -> () {
-        println!("{msg:?}");
         let tn = SystemTime::now();
         // Skip if the message has been sent within the timeout
         match self.msgs.get(msg) {
@@ -405,6 +412,7 @@ impl Alerting {
                 if *t > tn + self.alert_timeout { return (); },
         };
         self.msgs.insert(msg.to_string(), tn);
+        println!("{msg:?}");
         // We're already trying to log an error
         // so we just ignore the failure
         let _ = self.alerter.send(msg).await;
