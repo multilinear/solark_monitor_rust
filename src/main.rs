@@ -254,14 +254,12 @@ impl Matrix {
     async fn check_rooms(&mut self) -> Result<()> {
         if self.client.is_none() { return Ok(()); }
         if !self.cfg.enable { return Ok(()); }
-        println!("check rooms");
         let client = self.client.as_ref().unwrap();
         client.sync_once(self.sync_settings.clone()).await?;
         let mut sync_again = false;
         for room in client.joined_rooms() {
-            println!("Checking ids for room {0:?}", room.room_id());
             let ids = room.joined_user_ids().await?;
-            if ids.len() < 2 {
+            if !ids.iter().any(|x| x.as_str() != self.cfg.user) {
                 println!("Matrix room {0:?} is empty, leaving", room.room_id());
                 room.leave().await?;
                 sync_again = true;
@@ -279,7 +277,12 @@ impl Matrix {
             let id = invite.inviter.as_ref().unwrap().user_id();
             if self.allowed_users.iter().any(|x| x.as_str()==id) {
                 println!("User {id:?} invited us to a {0:?}, joining", room.room_id());
-                client.join_room_by_id(room.room_id()).await?;
+                if client.join_room_by_id(room.room_id()).await.is_err() {
+                    // If joining doesn't work, leave the room so it drops
+                    // off the invite list
+                    println!("Room join failed, leaving instead");
+                    room.leave().await?;
+                }
                 sync_again = true;
             } else {
                 println!("SECURITY WARNING! {0:?} invited me to chat", id);
@@ -566,7 +569,7 @@ async fn main() -> Result<()> {
             }
         }
         alerting.gc();
-        //alerting.check_rooms().await?;
+        alerting.check_rooms().await?;
     }
 }
 
