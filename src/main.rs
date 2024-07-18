@@ -113,7 +113,10 @@ impl Solark {
     // We can still do non-modbus stuff, like talk to influxdb, while awaiting
     for reg in &self.cfg.registers {
         let data = Solark::read_register(ctx, &reg).await?;
-        results.insert(reg.metric.clone(), data); // TODO: get rid of clone here
+        // TODO: biggest flaw in this code is that we copy the strings
+        // each time... we could e.g. use numeric mapping
+        // using a ref here works poorly
+        results.insert(reg.metric.clone(), data);
     }
     Ok(results)
   }
@@ -223,7 +226,6 @@ struct MatrixSettings {
     user: String,
     passwd: String,
     server: String,
-    // TODO: add some matrix settings
 }
 
 struct Matrix {
@@ -241,7 +243,6 @@ impl Matrix {
         }
     }
     async fn connect(&mut self) -> Result<()> {
-        println!("connecting to matrix");
         if self.client.is_some() { return Ok(()); }
         use matrix_sdk::Client;
         let client = Client::builder().homeserver_url(&self.cfg.server).build().await?;
@@ -249,6 +250,7 @@ impl Matrix {
         // We can't use Matrix::sync() because that's recursion and
         // async fns don't like recursion
         client.sync_once(self.sync_settings.clone()).await?;
+        //client.add_event_handler(
         println!("connected to Matrix {0:?}", self.cfg);
         self.client = Some(client);
         Ok(())
@@ -265,13 +267,15 @@ impl Matrix {
     }
     async fn send(&mut self, msg: &str) -> Result<()> {
         use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        println!("Sending msg {msg:?} via matrix");
         self.connect().await?;
         let client = self.client.as_mut().unwrap();
         client.sync_once(self.sync_settings.clone()).await?;
         let rooms = client.joined_rooms();
+        println!("Sending msg {msg:?} via matrix to {0:?} rooms", rooms.len());
         for room in rooms {
             let matrix_msg = RoomMessageEventContent::text_plain(msg);
-            room.send(matrix_msg);
+            room.send(matrix_msg).await?;
         }
         Ok(())
     }
@@ -348,7 +352,7 @@ impl Alerting {
         // We're effectively implementing a very very shitty little
         // DSL here. Possibly we could plug in a rust crate that includes
         // an interpreter for something more real?
-        for i in 1..self.alerts.len() {
+        for i in 0..self.alerts.len() {
             let a = &mut self.alerts[i];
             // This is a misconfiguration, so we want to crash
             // note that this will happen on the first run of "check"

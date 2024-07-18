@@ -32,6 +32,12 @@ registers = [
   { name = "Gen Freq", addr = 194, datatype = "Hz" },
 ]
 
+[matrix]
+server = "https://matrix.org"
+user = "<your bot user here>"
+passwd = "<your users' password here>"
+allowed_users = ["<your user>", "<your housemates user>"]
+
 [alerting]
 alerts = [
   { metric = "Faults", msg = "Solark has Faults Go Check the screen", check = "=1" },
