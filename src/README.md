@@ -62,6 +62,18 @@ meaning when condition is no longer true.
 is still true. This is useful as a "reminder" that things aren't back to normal
 yet. I have mine set to 24 hours (in seconds).
 
+## Getting alerts
+You'll need to create an account for your bot and configure the bot to log into
+it, and you'll need to put your account in the allowed_users list.
+
+Now, log in to matrix with your preferred client and invite the bot to chat. It
+may take a while due to matrix latency and polling frequency, but the bot should
+join the chat eventually. If you invite the bot to a room everyone in the room
+must be on the allowed_users list AND it must be invited by an allowed_user. If
+not it won't join at all, or will leave the chat again.
+
+This works transparently with encryption if you enable it.
+
 ## Design Choices
 Having written a previous version of this in python, I got annoyed at how
 python requires extensive testing due to it's dynamic nature, and I was finding
