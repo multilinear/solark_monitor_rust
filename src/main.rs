@@ -1,9 +1,10 @@
 use tokio;
-use std::time::Duration;
-use std::fmt;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::time::{SystemTime, Duration};
+//use std::fmt::format;
 
-pub type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 // *************************** Config ***************************************
 
@@ -50,19 +51,33 @@ struct SolarkSettings {
 
 #[derive(Debug)]
 struct Solark {
-  serial: String,
   cfg: SolarkSettings,
-	ctx: tokio_modbus::client::Context,
+  serial: Option<String>,
+	ctx: Option<tokio_modbus::client::Context>,
 }	
 
 impl Solark {
-	pub async fn connect(cfg: &SolarkSettings) -> Result<Solark> {
+  // TODO: could we actually just pass this whole-hog
+  // like a move? Rather than copying SolarkSettings?
+  fn new(cfg: &SolarkSettings) -> Self {
+      Self{
+        cfg: cfg.clone(),
+        serial: None,
+        ctx: None,
+      }
+  }
+
+  pub async fn connect(&mut self) -> Result<()> {
+    match self.ctx {
+        Some(_) => return Ok(()),
+        None => (),
+    }
     use tokio_modbus::prelude::*;
     // connect
-    let slave = Slave(cfg.slave_id); // Solark modbus ID
+    let slave = Slave(self.cfg.slave_id); // Solark modbus ID
 
-    let builder = tokio_serial::new(&cfg.port, 9600);
-    let port = tokio_serial::SerialStream::open(&builder).unwrap();
+    let builder = tokio_serial::new(&self.cfg.port, 9600);
+    let port = tokio_serial::SerialStream::open(&builder)?;
 
     let mut ctx = rtu::attach_slave(port, slave);
     // check the connection by pulling the serial number
@@ -73,14 +88,13 @@ impl Solark {
         serial.push((nibble>>8) as u8 as char); 
         serial.push(nibble as u8 as char); 
     }
-    return Ok(Solark{
-        cfg: cfg.clone(),
-        serial,
-        ctx: ctx,
-      });
+    println!("connected to Solark Serial# {0:?} on port {1:?}", serial, self.cfg.port);
+    self.ctx = Some(ctx);
+    self.serial = Some(serial);
+    return Ok(());
 	}
 
-	pub async fn read_register(ctx: &mut tokio_modbus::client::Context, reg: &SolarkReg) -> Result<RegData> {
+	async fn read_register(ctx: &mut tokio_modbus::client::Context, reg: &SolarkReg) -> Result<RegData> {
     use tokio_modbus::prelude::*;
     let count = match reg.datatype {
             RegDataType::Bool64Bit => 4,
@@ -103,12 +117,15 @@ impl Solark {
 	}
 
   pub async fn read_all(&mut self) -> Result<Vec<SolarkDatum>> {
+    self.connect().await?;
+    // connect succeeded so ctx exists
+    let ctx = &mut self.ctx.as_mut().unwrap();
     let mut results = Vec::new();
     // Sadly we can't parallelize this because self has to be borrowed as mutable
     // It's probably good though, since that would be a threadsafety problem
     // We can still do non-modbus stuff, like talk to influxdb, while awaiting
     for reg in &self.cfg.registers {
-        let data = Solark::read_register(&mut self.ctx, &reg).await?;
+        let data = Solark::read_register(ctx, &reg).await?;
         results.push(
             SolarkDatum{
                 name: reg.name.clone(), // TODO: get rid of this string copy
@@ -118,9 +135,14 @@ impl Solark {
     Ok(results)
   }
 
-	pub async fn disconnect(&mut self) -> Result<()> {
-	  println!("Disconnecting");
-    self.ctx.disconnect().await??;
+	async fn disconnect(&mut self) -> Result<()> {
+    match &mut self.ctx {
+      Some(ctx) => {
+	        println!("Disconnecting");
+          ctx.disconnect().await??;
+        },
+      None => (),
+    }
     Ok(())
 	}
 }
@@ -148,19 +170,40 @@ struct InfluxSettings {
 
 struct Influx {
     cfg: InfluxSettings,
-    client: influxdb2::Client,
+    client: Option<influxdb2::Client>,
 }
 
 impl Influx {
-    async fn connect(cfg: &InfluxSettings) -> Result<Influx> {
-        use influxdb2::Client;
-        let client = Client::new(&cfg.url, &cfg.org, &cfg.token);
-        Ok(Influx{
+    fn new(cfg: &InfluxSettings) -> Self {
+        Self{
             cfg: cfg.clone(),
-            client: client,
-        })
+            client: None,
+        }
+    }
+    async fn connect(&mut self) -> Result<()> {
+      match self.client {
+        Some(_) => Ok(()),
+        None =>  {
+            use influxdb2::Client;
+            let cfg = &self.cfg;
+            let client = Client::new(&cfg.url, &cfg.org, &cfg.token);
+            println!("connected to InfluxDB at {0:?}", self.cfg.url);
+            self.client = Some(client);
+            Ok(())
+          },
+      }
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        self.client = None;
+        Ok(())
     }
     async fn write_point(&mut self, data: &Vec<SolarkDatum>) -> Result<()> {
+        // Automatically reconnect if we're not connected
+        self.connect().await?;
+        // connect either created client, or errored out
+        // so unwrap can't fail here
+        let client = self.client.as_mut().unwrap();
+        // Build up the list of points
         use influxdb2::models::DataPoint;
         let mut points = Vec::new();
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
@@ -189,7 +232,7 @@ impl Influx {
         }
         println!("writing points {points:?}");
         // TODO: We could avoid building the whole point list first
-        self.client.write(&self.cfg.bucket, futures::stream::iter(points)).await?;
+        client.write(&self.cfg.bucket, futures::stream::iter(points)).await?;
         Ok(())
     }
 }
@@ -204,73 +247,187 @@ struct Matrix {
     cfg: MatrixSettings,
 }
 impl Matrix {
-    pub async fn connect(cfg: &MatrixSettings) -> Result<Matrix> {
-        // TODO write some matrix code
-        Ok(Matrix{
+    fn new(cfg: &MatrixSettings) -> Self {
+        Matrix{
             cfg: cfg.clone(),
-        })
+        }
     }
-    async fn send(self, msg: &str) -> Result<()> {
+    async fn connect(&mut self) -> Result<()> {
+        // TODO write some matrix code
+        Ok(())
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn send(&self, msg: &str) -> Result<()> {
         println!("TODO matrix not implemented msg: {msg:?}");
         Ok(())
     }
 }
 
 //***************************** Alerts **********************************
+#[derive(Debug, Deserialize, Clone)]
+struct AlertDesc {
+    metric: String,
+    check: String,
+    msg: String, 
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct AlertSettings {
-    // TODO: add some alert settings
+    alerts: Vec<AlertDesc>,
+    alert_timeout_secs: u32,
 }
 
-struct Alerts<'a> {
-    cfg: AlertSettings,
-    alerter: &'a Matrix,
+struct Alert {
+    metric: String,
+    fun: Box<dyn Fn(i64) -> bool>,
+    fired: Option<SystemTime>,
+    msg: String,
 }
-impl Alerts<'_> {
-    pub async fn check(&self, data: &Vec<SolarkDatum>) -> Result<()> {
-        // TODO: write an actual check 
+
+struct Alerting {
+    alerter: Matrix,
+    alerts: Vec<Alert>,
+    alert_timeout: Duration,
+}
+
+impl Alerting {
+    fn new(cfg: &AlertSettings, alerter: Matrix) -> Result<Self> {
+        let mut alerts = Vec::with_capacity(cfg.alerts.len());
+        for a in cfg.alerts.iter() {
+            let val : i64 = a.check.chars().skip_while(|c| !c.is_digit(10))
+                .collect::<String>().parse().expect(
+                    "Failed to parse alert check expression from config");
+            alerts.push(
+                Alert {
+                    metric: a.metric.clone(),
+                    // TODO: add other standard comparison operators?
+                    fun: if a.check.starts_with("<") {
+                            Box::new(move |x| x < val)
+                        } else if a.check.starts_with(">") {
+                            Box::new(move |x| x > val)
+                        } else if a.check.starts_with("=") {
+                            Box::new(move |x| x == val)
+                        } else {
+                            // TODO: should probably throw an error
+                            Box::new(|_| false)
+                        },
+                    fired: None,
+                    msg: a.msg.clone(),
+                }
+            )
+        }
+        Ok(Self {
+            alerter: alerter,
+            alerts: alerts,
+            alert_timeout: Duration::from_secs(cfg.alert_timeout_secs.into()),
+        })
+    }
+    async fn check(&mut self, data: &Vec<SolarkDatum>) -> Result<()> {
+        // TODO: could probably change the original format to a hashmap
+        let map = data.iter().fold(HashMap::new(), |mut map, datum| {
+                map.insert(&datum.name, datum);
+                map
+            });
+        let tn = SystemTime::now();
+        // We're effectively implementing a very very shitty little
+        // DSL here. Possibly we could plug in a rust crate that includes
+        // an interpreter for something more real?
+        for i in 1..self.alerts.len() {
+            let a = &mut self.alerts[i];
+            // TODO: a typo could cause an error here, fix
+            let val = match map.get(&a.metric).unwrap().value {
+                RegData::Watts(v) => v as i64,
+                RegData::Percent(v) => v as i64,
+                RegData::Hz(v) => v as i64,
+                RegData::Bool(v) => v as i64,
+            };
+            match ((a.fun)(val), a.fired) {
+                (true, Some(t)) => 
+                    if tn > t + self.alert_timeout {
+                        Self::realert(&self.alerter, &a.msg, &a.metric, val).await?
+                    },
+                (true, None) => { 
+                        a.fired = Some(tn);
+                        Self::alert(&self.alerter, &a.msg, &a.metric, val).await?
+                    },
+                (false, Some(_)) => {
+                        a.fired = None;
+                        Self::clear_alert(&self.alerter, &a.msg, &a.metric, val).await?
+                    },
+                (false, None) => (),
+            }
+        }
         Ok(()) 
+    }
+    async fn alert(alerter: &Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
+        alerter.send(&format!("Alert: {msg:?}, {metric:?}={val:?}")).await?;
+        Ok(())
+    }
+    async fn realert(alerter: &Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
+        alerter.send(&format!("Re-Alert: {msg:?}, {metric:?}={val:?}")).await?;
+        Ok(())
+    }
+    async fn clear_alert(alerter: &Matrix, msg: &str, metric: &str, val: i64) -> Result<()> {
+        alerter.send(&format!("Alert cleared: {msg:?}, {metric:?}={val:?}")).await?;
+        Ok(())
+    }
+    async fn error(&mut self, msg: &str) -> () {
+        // TODO: this is where we add backoff
+        // maybe store a log of the messages and check against it
+        // before resending
+        // Make sure we print even if the alerter is disconnected
+        println!("{msg:?}");
+        // We're already trying to log an error
+        // so we just ignore the failure
+        let _ = self.alerter.send(msg).await;
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        self.alerter.disconnect().await?;
+        Ok(())
+    }
+    async fn connect(&mut self) -> Result<()> {
+        self.alerter.connect().await?;
+        Ok(())
     }
 }
 
 //***************************** Main ************************************
 
-async fn run_loop(solark: &mut Solark, influx: &mut Influx, alerts: &mut Alerts<'_>) -> Result<()> {
+async fn run_loop(solark: &mut Solark, influx: &mut Influx, alerting: &mut Alerting) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
     // We need to start out with some values
     loop {
         println!("");
         interval.tick().await;
-        let values = solark.read_all().await?;
+        let values = match solark.read_all().await {
+            Ok(v) => v,
+            Err(e) => {
+                alerting.error(&format!("Modbus Error: {e:?}")).await;
+                solark.disconnect().await?;
+                continue;
+            }
+        };
         println!("values = {values:?}");
         // Read the next set of values while we process the last set
         let writef = influx.write_point(&values);
-        let alertsf = alerts.check(&values);
-        let (write_res, alert_res) = tokio::join!(writef, alertsf);
+        let alertingf = alerting.check(&values);
+        let (write_res, alert_res) = tokio::join!(writef, alertingf);
         match write_res {
             Ok(_) => (),
-            // We should trigger a reconnect here
-            Err(v) => println!("Influx Error: {v:?}"),
-        };
+            Err(e) => {
+                alerting.error(&format!("Influx Error: {e:?}")).await;
+                influx.disconnect().await?;
+            }
+        }
         match alert_res {
             Ok(_) => (),
-            // We should trigger a reconnect here
-            Err(v) => println!("Alerts Error: {v:?}"),
+            Err(e) => {
+                alerting.error(&format!("Alerting Error: {e:?}")).await;
+                alerting.disconnect().await?;
+            }
         }
-    }
-}
-
-#[derive(Debug)]
-struct MyError;
-impl fmt::Display for MyError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Parse error")
-    }
-}
-impl std::error::Error for MyError {
-    fn description(&self) -> &str {
-        return "This is a parse error";
     }
 }
 
@@ -279,7 +436,7 @@ struct Settings {
     influxdb: InfluxSettings, 
     solark: SolarkSettings,
     matrix: MatrixSettings,
-    alerts: AlertSettings,
+    alerting: AlertSettings,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -292,25 +449,23 @@ async fn main() -> Result<()> {
     let settings : Settings = cfg.try_deserialize()?;
     println!("config is {settings:?}");
     println!();
-    let solarkcf = Solark::connect(&settings.solark);
-    let influxcf = Influx::connect(&settings.influxdb);
-    let matrixcf = Matrix::connect(&settings.matrix);
+    let mut solark = Solark::new(&settings.solark);
+    let mut influx = Influx::new(&settings.influxdb);
+    let mut alerting = Alerting::new(&settings.alerting, Matrix::new(&settings.matrix))?;
+
+    // NOW we start actually doing stuff
+    let solarkcf = solark.connect();
+    let influxcf = influx.connect();
+    let alertingcf = alerting.connect();
     // TODO: a failure to connect to matrix crashes the program... no good
     // Similarly all connections should get retried forever
-    let (mut solark, mut influx, mut matrix) = tokio::try_join!(solarkcf, influxcf, matrixcf)?;
-    println!("connected to Solark Serial# {0:?} on port {1:?}", solark.serial, solark.cfg.port);
-    let mut alerts = Alerts{cfg: settings.alerts.clone(), alerter: &matrix};
-    println!("connected to InfluxDB at {0:?}", settings.influxdb.url);
-    // We put this in a seperate function to simplify error propogation
-    // This way it's easy to disconnect on error
-    // TODO: we'll want to recover from these errors eventually, e.g. if
-    // you disconnect the cable it should keep trying.
-    let res = run_loop(&mut solark, &mut influx, &mut alerts).await;
-    let dres = solark.disconnect().await;
-    match res {
-        Ok(_) => return dres,
-        Err(_) => return res,
-    }
+    // 2 options:
+    // - split into 3 threads of excution, and copy all the data by channels
+    // - add "connected" state to each object so we can continue execution on failure
+    //   and try reconnecting when needed
+    tokio::try_join!(solarkcf, influxcf, alertingcf)?;
+    run_loop(&mut solark, &mut influx, &mut alerting).await?;
+    Ok(())
 }
 
 
