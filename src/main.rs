@@ -446,8 +446,15 @@ struct Settings {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let cfgpath = "/etc/solark_monitor.toml";
-    println!("Reading config file {cfgpath}");
+    use std::env;
+    let args: Vec<String> = env::args().collect();
+    let cfgpath =
+        if args.len() < 2 {
+            "/etc/solark_monitor.toml"
+        } else {
+            &args[1]
+        };
+    println!("Reading config file {cfgpath:?}");
     let cfg = config::Config::builder()
         .add_source(config::File::new(cfgpath, config::FileFormat::Toml))
         .build()?;
