@@ -454,16 +454,18 @@ async fn main() -> Result<()> {
     let mut alerting = Alerting::new(&settings.alerting, Matrix::new(&settings.matrix))?;
 
     // NOW we start actually doing stuff
+    // The initial connection is to *try* and set things up
+    // We'll try and reconnect later if we fail now
     let solarkcf = solark.connect();
     let influxcf = influx.connect();
     let alertingcf = alerting.connect();
-    // TODO: a failure to connect to matrix crashes the program... no good
-    // Similarly all connections should get retried forever
-    // 2 options:
-    // - split into 3 threads of excution, and copy all the data by channels
-    // - add "connected" state to each object so we can continue execution on failure
-    //   and try reconnecting when needed
-    tokio::try_join!(solarkcf, influxcf, alertingcf)?;
+    let (solark_res, influx_res, alert_res) = tokio::join!(solarkcf, influxcf, alertingcf);
+    for res in [solark_res, influx_res, alert_res] {
+        match res {
+            Ok(_) => (),
+            Err(e) => alerting.error(&format!("Startup Error: {e:?}")).await,
+        };
+    }
     run_loop(&mut solark, &mut influx, &mut alerting).await?;
     Ok(())
 }
