@@ -230,21 +230,67 @@ struct MatrixSettings {
     user: String,
     passwd: String,
     server: String,
+    allowed_users: Vec<String>,
 }
 
 struct Matrix {
     cfg: MatrixSettings,
+    allowed_users: Vec<String>,
     sync_settings: matrix_sdk::config::SyncSettings,
     client: Option<matrix_sdk::Client>, 
 }
 impl Matrix {
     fn new(cfg: &MatrixSettings) -> Self {
         use matrix_sdk::config::SyncSettings;
+        let mut allowed_users = cfg.allowed_users.clone();
+        allowed_users.push(cfg.user.clone());
         Matrix{
             cfg: cfg.clone(),
-            client: None,
+            allowed_users: allowed_users,
             sync_settings: SyncSettings::default(),
+            client: None,
         }
+    }
+    async fn check_rooms(&mut self) -> Result<()> {
+        if self.client.is_none() { return Ok(()); }
+        if !self.cfg.enable { return Ok(()); }
+        println!("check rooms");
+        let client = self.client.as_ref().unwrap();
+        client.sync_once(self.sync_settings.clone()).await?;
+        let mut sync_again = false;
+        for room in client.joined_rooms() {
+            println!("Checking ids for room {0:?}", room.room_id());
+            let ids = room.joined_user_ids().await?;
+            if ids.len() < 2 {
+                println!("Matrix room {0:?} is empty, leaving", room.room_id());
+                room.leave().await?;
+                sync_again = true;
+            }
+            for id in ids {
+                if !self.allowed_users.iter().any(|x| x.as_str()==id) {
+                    println!("User {id:?} is in the room, leaving");
+                    room.leave().await?;
+                    sync_again = true;
+                }
+            }
+        }
+        for room in client.invited_rooms() {
+            let invite = room.invite_details().await?;
+            let id = invite.inviter.as_ref().unwrap().user_id();
+            if self.allowed_users.iter().any(|x| x.as_str()==id) {
+                println!("User {id:?} invited us to a {0:?}, joining", room.room_id());
+                client.join_room_by_id(room.room_id()).await?;
+                sync_again = true;
+            } else {
+                println!("SECURITY WARNING! {0:?} invited me to chat", id);
+                room.leave().await?;
+                sync_again = true;
+            }
+        }
+        if sync_again {
+            client.sync_once(self.sync_settings.clone()).await?;
+        }
+        Ok(())
     }
     async fn connect(&mut self) -> Result<()> {
         if self.client.is_some() { return Ok(()); }
@@ -252,10 +298,7 @@ impl Matrix {
         use matrix_sdk::Client;
         let client = Client::builder().homeserver_url(&self.cfg.server).build().await?;
         client.matrix_auth().login_username(&self.cfg.user, &self.cfg.passwd).send().await?;
-        // We can't use Matrix::sync() because that's recursion and
-        // async fns don't like recursion
-        client.sync_once(self.sync_settings.clone()).await?;
-        //client.add_event_handler(
+        self.check_rooms().await?;
         println!("connected to Matrix {0:?}", self.cfg);
         self.client = Some(client);
         Ok(())
@@ -277,7 +320,6 @@ impl Matrix {
         println!("Sending msg {msg:?} via matrix");
         self.connect().await?;
         let client = self.client.as_mut().unwrap();
-        client.sync_once(self.sync_settings.clone()).await?;
         let rooms = client.joined_rooms();
         println!("Sending msg {msg:?} via matrix to {0:?} rooms", rooms.len());
         for room in rooms {
@@ -440,6 +482,10 @@ impl Alerting {
         self.alerter.connect().await?;
         Ok(())
     }
+    async fn check_rooms(&mut self) -> Result<()> {
+        self.alerter.check_rooms().await?;
+        Ok(())
+    }
 }
 
 //***************************** Main ************************************
@@ -520,6 +566,7 @@ async fn main() -> Result<()> {
             }
         }
         alerting.gc();
+        //alerting.check_rooms().await?;
     }
 }
 
