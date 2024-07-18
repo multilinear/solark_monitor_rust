@@ -1,8 +1,6 @@
 use tokio;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::time::{SystemTime, Duration};
-//use std::fmt::format;
 
 type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -11,7 +9,7 @@ type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 //**************************** Solark (modbus) *******************************
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum RegData {
     Bool(bool),
     Watts(i16),
@@ -19,11 +17,7 @@ enum RegData {
     Hz(u16),
 }
 
-#[derive(Debug, Clone)]
-struct SolarkDatum {
-  name: String,
-  value: RegData,
-}
+type SolarkData = std::collections::BTreeMap<String, RegData>;
 
 #[derive(Debug, Deserialize, Clone)]
 enum RegDataType {
@@ -36,7 +30,7 @@ enum RegDataType {
 
 #[derive(Debug, Deserialize, Clone)]
 struct SolarkReg {
-  name: String, // What to call the data
+  metric: String, // What to call the data
   addr: u16, // Address of the register
   datatype: RegDataType, // How to store the final data
 }
@@ -57,8 +51,6 @@ struct Solark {
 }	
 
 impl Solark {
-  // TODO: could we actually just pass this whole-hog
-  // like a move? Rather than copying SolarkSettings?
   fn new(cfg: &SolarkSettings) -> Self {
       Self{
         cfg: cfg.clone(),
@@ -116,21 +108,17 @@ impl Solark {
      })
 	}
 
-  pub async fn read_all(&mut self) -> Result<Vec<SolarkDatum>> {
+  pub async fn read_all(&mut self) -> Result<SolarkData> {
     self.connect().await?;
     // connect succeeded so ctx exists
     let ctx = &mut self.ctx.as_mut().unwrap();
-    let mut results = Vec::new();
+    let mut results = SolarkData::new();
     // Sadly we can't parallelize this because self has to be borrowed as mutable
     // It's probably good though, since that would be a threadsafety problem
     // We can still do non-modbus stuff, like talk to influxdb, while awaiting
     for reg in &self.cfg.registers {
         let data = Solark::read_register(ctx, &reg).await?;
-        results.push(
-            SolarkDatum{
-                name: reg.name.clone(), // TODO: get rid of this string copy
-                value: data,
-            });
+        results.insert(reg.metric.clone(), data); // TODO: get rid of clone here
     }
     Ok(results)
   }
@@ -150,7 +138,7 @@ impl Solark {
 //***************************** Influx **********************************
 
 // This is a workaround.
-// ideally we'd just use a HashMap<String,String>, but
+// ideally we'd just use a BTreeMap<String,String>, but
 // the config crate case squashes keys. Doing it this way
 // makes the tag a value, rather than a key.
 #[derive(Debug, Deserialize, Clone)]
@@ -197,7 +185,7 @@ impl Influx {
         self.client = None;
         Ok(())
     }
-    async fn write_point(&mut self, data: &Vec<SolarkDatum>) -> Result<()> {
+    async fn write_point(&mut self, data: &SolarkData) -> Result<()> {
         // Automatically reconnect if we're not connected
         self.connect().await?;
         // connect either created client, or errored out
@@ -207,24 +195,23 @@ impl Influx {
         use influxdb2::models::DataPoint;
         let mut points = Vec::new();
         let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap();
-        println!("tags to add {0:?}", self.cfg.tags);
-        for datum in data {
-            let point = DataPoint::builder(&datum.name);
+        for (metric, datum) in data.iter() {
+            let point = DataPoint::builder(metric);
             points.push(
                 self.cfg.tags.iter().fold(
-                    match datum.value {
+                    match datum {
                         RegData::Bool(v) => 
                             point.tag("units", "Bool")
-                            .field("value", if v {1} else {0}),
+                            .field("value", if *v {1} else {0}),
                         RegData::Watts(v) =>
                             point.tag("units", "Watts")
-                            .field("value", v as i64),
+                            .field("value", *v as i64),
                         RegData::Percent(v) =>
                             point.tag("units", "Percent")
-                            .field("value", v as i64),
+                            .field("value", *v as i64),
                         RegData::Hz(v) =>
                             point.tag("units", "Hz")
-                            .field("value", v as i64),
+                            .field("value", *v as i64),
                     }.timestamp(timestamp),
                     |point, tag| point.tag(&tag.key, &tag.val)
                 ).build()?
@@ -302,16 +289,20 @@ impl Alerting {
             alerts.push(
                 Alert {
                     metric: a.metric.clone(),
-                    // TODO: add other standard comparison operators?
-                    fun: if a.check.starts_with("<") {
-                            Box::new(move |x| x < val)
-                        } else if a.check.starts_with(">") {
-                            Box::new(move |x| x > val)
+                    fun: if a.check.starts_with(">=") {
+                            Box::new(move |x| x >= val)
+                        } else if a.check.starts_with("<=") {
+                            Box::new(move |x| x <= val)
                         } else if a.check.starts_with("=") {
                             Box::new(move |x| x == val)
+                        } else if a.check.starts_with("!=") {
+                            Box::new(move |x| x != val)
+                        } else if a.check.starts_with(">") {
+                            Box::new(move |x| x > val)
+                        } else if a.check.starts_with("<") {
+                            Box::new(move |x| x < val)
                         } else {
-                            // TODO: should probably throw an error
-                            Box::new(|_| false)
+                            std::panic!("Failed to parse alert check expression from config");
                         },
                     fired: None,
                     msg: a.msg.clone(),
@@ -324,24 +315,23 @@ impl Alerting {
             alert_timeout: Duration::from_secs(cfg.alert_timeout_secs.into()),
         })
     }
-    async fn check(&mut self, data: &Vec<SolarkDatum>) -> Result<()> {
-        // TODO: could probably change the original format to a hashmap
-        let map = data.iter().fold(HashMap::new(), |mut map, datum| {
-                map.insert(&datum.name, datum);
-                map
-            });
+    async fn check(&mut self, data: &SolarkData) -> Result<()> {
         let tn = SystemTime::now();
         // We're effectively implementing a very very shitty little
         // DSL here. Possibly we could plug in a rust crate that includes
         // an interpreter for something more real?
         for i in 1..self.alerts.len() {
             let a = &mut self.alerts[i];
-            // TODO: a typo could cause an error here, fix
-            let val = match map.get(&a.metric).unwrap().value {
-                RegData::Watts(v) => v as i64,
-                RegData::Percent(v) => v as i64,
-                RegData::Hz(v) => v as i64,
-                RegData::Bool(v) => v as i64,
+            // This is a misconfiguration, so we want to crash
+            // note that this will happen on the first run of "check"
+            // so it won't surprise us when an alert fires or something
+            let val = match data.get(&a.metric).expect(
+                    &format!("Alert metric {0:?} not found in monitored data, fix your config", a.metric)
+                  ) {
+                RegData::Watts(v) => *v as i64,
+                RegData::Percent(v) => *v as i64,
+                RegData::Hz(v) => *v as i64,
+                RegData::Bool(v) => *v as i64,
             };
             match ((a.fun)(val), a.fired) {
                 (true, Some(t)) => 
