@@ -39,6 +39,9 @@ server = "https://matrix.org"
 user = "<your bot user here>"
 passwd = "<your users' password here>"
 allowed_users = ["<your user>", "<your housemates user>"]
+# every 30 loops (5 minutes) check if we're in the right rooms
+# set to 0 to disable room checks entirely
+room_check_cycles = 30 
 
 [alerting]
 enable = true

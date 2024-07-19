@@ -231,6 +231,7 @@ struct MatrixSettings {
     passwd: String,
     server: String,
     allowed_users: Vec<String>,
+    room_check_cycles: i32,
 }
 
 struct Matrix {
@@ -306,13 +307,13 @@ impl Matrix {
         self.client = Some(client);
         Ok(())
     }
-    async fn sync(&mut self) -> Result<()> {
+    /*async fn sync(&mut self) -> Result<()> {
         if !self.cfg.enable { return Ok(()); }
         self.connect().await?;
         let client = self.client.as_mut().unwrap();
         client.sync_once(self.sync_settings.clone()).await?;
         Ok(())
-    }
+    }*/
     async fn disconnect(&mut self) -> Result<()> {
         self.client = None;
         Ok(())
@@ -518,6 +519,7 @@ async fn main() -> Result<()> {
     let settings : Settings = cfg.try_deserialize()?;
     println!("config is {settings:?}");
     println!();
+    let room_check_cycles = settings.matrix.room_check_cycles;
     let mut solark = Solark::new(&settings.solark);
     let mut influx = Influx::new(&settings.influxdb);
     let mut alerting = Alerting::new(&settings.alerting, Matrix::new(&settings.matrix))?;
@@ -537,6 +539,7 @@ async fn main() -> Result<()> {
     }
     let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
     println!("Starting monitoring loop");
+    let mut i = 1;
     // We need to start out with some values
     loop {
         //println!("");
@@ -569,7 +572,12 @@ async fn main() -> Result<()> {
             }
         }
         alerting.gc();
-        alerting.check_rooms().await?;
+        // Kinda hacky, this should be a persistant connection and
+        // an async callback, but the API for it is weird
+        if room_check_cycles != 0 && i % room_check_cycles == 0 {
+            alerting.check_rooms().await?;
+        }
+        i = i+1;
     }
 }
 
