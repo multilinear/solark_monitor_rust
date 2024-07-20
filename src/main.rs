@@ -302,9 +302,9 @@ impl Matrix {
         use matrix_sdk::Client;
         let client = Client::builder().homeserver_url(&self.cfg.server).build().await?;
         client.matrix_auth().login_username(&self.cfg.user, &self.cfg.passwd).send().await?;
-        self.check_rooms().await?;
         println!("connected to Matrix {0:?}", self.cfg);
         self.client = Some(client);
+        self.check_rooms().await?;
         Ok(())
     }
     /*async fn sync(&mut self) -> Result<()> {
