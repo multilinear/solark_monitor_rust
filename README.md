@@ -10,16 +10,6 @@ This has been tested on a x86_64 Gentoo Linux machine running Rust 1.77.1. That
 machine is connected to a Sol-Ark-15k-2P-N solar inverter. There is no reason it shouldn't work on other *nix devices at least, as well as working for RS485, but that has not been tested.
 
 ## Running/Installation
-Most dependencies will be pulled automatically, except one:
-https://github.com/matrix-org/matrix-rust-sdk
-
-The matrix rust SDK isn't officially stable, so it doesn't have a release yet.
-As a result it seems the best approach is to check it out yourself next to this
-project, and then make sure `Cargo.toml` has the right path to point to it. At
-that point running or building should work. Once that crate is stabilized you
-should be able to replace the path with the usual `"*"` and have it pull the
-crate automatically.
-
 If you run `cargo run` in a checkout it will run the program.
 
 To install run: `cargo build -r`. The resulting binary will be placed in
