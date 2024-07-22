@@ -12,7 +12,7 @@ poll_secs = 10
 # signed, and are added as tags to the influx data.
 registers = [
   { name = "Faults", addr = 103, datatype = "Bool64Bit" },
-  { name = "Gen Watts", addr = 165, datatype = "Watts" },
+  { name = "Gen Watts", addr = 166, datatype = "Watts" },
   { name = "Grid Watts", addr = 169, datatype = "Watts" },
   { name = "Inv Watts", addr = 175, datatype = "Watts" },
   { name = "Load Watts", addr = 178, datatype = "Watts" },
