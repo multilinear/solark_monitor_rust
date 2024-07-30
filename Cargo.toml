@@ -13,6 +13,6 @@ tokio-serial = "5.4.4"
 influxdb2 = "0.5.1"
 matrix-sdk = { git = "https://github.com/matrix-org/matrix-rust-sdk.git" }
 futures = "0.3.30"
-config = {version="*" , default_features=false, features=["async", "toml"]}
+config = {version="*" , default-features=false, features=["async", "toml"]}
 serde = "*"
 chrono = {version="*", features=["now"]}

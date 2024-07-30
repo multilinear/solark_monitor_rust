@@ -455,7 +455,7 @@ impl Alerting {
         match self.msgs.get(msg) {
             None => (),
             Some(t) => 
-                if *t > tn + self.alert_timeout { return (); },
+                if tn < *t + self.alert_timeout { return (); },
         };
         self.msgs.insert(msg.to_string(), tn);
         println!("{msg:?}");
@@ -471,7 +471,7 @@ impl Alerting {
         let tn = SystemTime::now();
         let mut todelete = None;
         for (msg, t) in self.msgs.iter() {
-            if *t > tn + self.alert_timeout {
+            if tn > *t + self.alert_timeout {
                 todelete = Some(msg.clone());
                 break;
             }
