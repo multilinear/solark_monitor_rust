@@ -13,6 +13,7 @@ enum RegData {
     Watts(i16),
     Percent(u16),
     Hz(u16),
+    Volts(i16),
 }
 
 type SolarkData = BTreeMap<String, RegData>;
@@ -24,6 +25,7 @@ enum RegDataType {
     Watts,
     Percent,
     Hz,
+    Volts,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -81,6 +83,15 @@ impl Solark {
     return Ok(());
 	}
 
+  fn make_signed(v: u16) -> i16 {
+    // massage into a signed value
+    if v > (1<<(16-1))-1 {
+        (v as i32 - (1<<16)) as i16
+    } else {
+        v as i16
+    }
+  }
+
 	async fn read_register(ctx: &mut tokio_modbus::client::Context, reg: &SolarkReg) -> Result<RegData> {
     use tokio_modbus::prelude::*;
     let count = match reg.datatype {
@@ -91,15 +102,10 @@ impl Solark {
     Ok(match reg.datatype {
         RegDataType::Bool64Bit => RegData::Bool(v[0] | v[1] | v[2] | v[3] != 0),
         RegDataType::Bool => RegData::Bool(v[0] != 0),
-        RegDataType::Watts => RegData::Watts(
-            // massage into a signed value
-            if v[0] > (1<<(16-1))-1 {
-                (v[0] as i32 - (1<<16)) as i16
-            } else {
-                v[0] as i16
-            }),
+        RegDataType::Watts => RegData::Watts(Self::make_signed(v[0])),
         RegDataType::Percent => RegData::Percent(v[0]),
-        RegDataType::Hz => RegData::Hz(v[0])
+        RegDataType::Hz => RegData::Hz(v[0]),
+        RegDataType::Volts => RegData::Volts(Self::make_signed(v[0])),
      })
 	}
 
@@ -214,6 +220,9 @@ impl Influx {
                     RegData::Hz(v) =>
                         point.tag("units", "Hz")
                         .field("value", *v as i64),
+                    RegData::Volts(v) =>
+                        point.tag("units", "Volts")
+                        .field("value", *v as f64 / 10.0),
                 }.timestamp(timestamp),
                 |p, tag| p.tag(&tag.key, &tag.val)
             ).build().unwrap()
@@ -420,6 +429,7 @@ impl Alerting {
                 RegData::Watts(v) => *v as i64,
                 RegData::Percent(v) => *v as i64,
                 RegData::Hz(v) => *v as i64,
+                RegData::Volts(v) => *v as i64,
                 RegData::Bool(v) => *v as i64,
             };
             match ((a.fun)(val), a.fired) {

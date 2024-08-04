@@ -11,15 +11,16 @@ poll_secs = 10
 # other types impact whether 16-bit values are treated as
 # signed, and are added as tags to the influx data.
 registers = [
-  { name = "Faults", addr = 103, datatype = "Bool64Bit" },
-  { name = "Gen Watts", addr = 166, datatype = "Watts" },
-  { name = "Grid Watts", addr = 169, datatype = "Watts" },
-  { name = "Inv Watts", addr = 175, datatype = "Watts" },
-  { name = "Load Watts", addr = 178, datatype = "Watts" },
-  { name = "Batt SOC", addr = 184, datatype = "Percent" },
-  { name = "Batt Watts", addr = 190, datatype = "Watts" },
-  { name = "Grid Live", addr = 194, datatype = "Bool" },
-  { name = "Gen Freq", addr = 194, datatype = "Hz" },
+  { metric = "Faults", addr = 103, datatype = "Bool64Bit" },
+  { metric = "Gen Watts", addr = 166, datatype = "Watts" },
+  { metric = "Grid Volts", addr = 152, datatype = "Volts" },
+  { metric = "Grid Watts", addr = 169, datatype = "Watts" },
+  { metric = "Inv Watts", addr = 175, datatype = "Watts" },
+  { metric = "Load Watts", addr = 178, datatype = "Watts" },
+  { metric = "Batt SOC", addr = 184, datatype = "Percent" },
+  { metric = "Batt Watts", addr = 190, datatype = "Watts" },
+  { metric = "Grid Live", addr = 194, datatype = "Bool" },
+  { metric = "Gen Freq", addr = 194, datatype = "Hz" },
 ]
 
 [influxdb]
@@ -49,7 +50,7 @@ alerts = [
   { metric = "Faults", msg = "Solark has Faults Go Check the screen", check = "=1" },
   { metric = "Grid Live", msg = "Grid is down running on battery power", check = "=0" },
   { metric = "Batt SOC", msg = "Battery is below 10%", check = "<10" },
-  { metrics = "Batt SOC", msg = "Battery is below 20%", check = "<20" }
+  { metric = "Batt SOC", msg = "Battery is below 20%", check = "<20" }
 ]
 
 # in minutes
