@@ -9,6 +9,7 @@ type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug)]
 enum RegData {
+    Error,
     Bool(bool),
     Watts(i16),
     Percent(u16),
@@ -16,7 +17,13 @@ enum RegData {
     Volts(i16),
 }
 
-type SolarkData = BTreeMap<String, RegData>;
+// We store the actual data in a vector
+// This way we can cache the index and avoid doing
+// tree lookups every cycle
+type SolarkData = Vec<RegData>;
+// Seperately we store an index into that vector
+type SolarkIndex = BTree<String, i64>;
+
 
 #[derive(Debug, Deserialize, Clone)]
 enum RegDataType {
@@ -109,20 +116,24 @@ impl Solark {
      })
 	}
 
-  pub async fn read_all(&mut self) -> Result<SolarkData> {
+  pub fn new_data() -> SolarkData {
+    let mut results = SolarkData::new();
+    for reg in &self.cfg.registers {
+        results.insert(reg.metric.clone(), Rc::new(RegData::Error));
+    }
+    return results;
+  }
+
+  pub async fn read_all(&mut self, &mut data: SolarkData) -> () {
     self.connect().await?;
     // connect succeeded so ctx exists
     let ctx = &mut self.ctx.as_mut().unwrap();
-    let mut results = SolarkData::new();
     // Sadly we can't parallelize this because self has to be borrowed as mutable
     // It's probably good though, since that would be a threadsafety problem
     // We can still do non-modbus stuff, like talk to influxdb, while awaiting
     for reg in &self.cfg.registers {
         let data = Solark::read_register(ctx, &reg).await?;
-        // TODO: biggest flaw in this code is that we copy the strings
-        // each time... we could e.g. use numeric mapping
-        // using a ref here works poorly
-        results.insert(reg.metric.clone(), data);
+        results.get(reg.metric, data);
     }
     Ok(results)
   }
@@ -551,6 +562,7 @@ async fn main() -> Result<()> {
     println!();
     let room_check_cycles = settings.matrix.room_check_cycles;
     let mut solark = Solark::new(&settings.solark);
+    let mut (solark_data, solark_index) = solark::new_solarkdata();
     let mut influx = Influx::new(&settings.influxdb);
     let mut alerting = Alerting::new(&settings.alerting, Matrix::new(&settings.matrix))?;
 
