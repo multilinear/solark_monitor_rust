@@ -349,7 +349,9 @@ impl Matrix {
 struct AlertDesc {
     metric: String,
     check: String,
+    limit: f64,
     msg: String, 
+    delaysecs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -359,11 +361,19 @@ struct AlertSettings {
     alert_timeout_secs: u32,
 }
 
+#[derive(Debug, Clone)]
+enum AlertState {
+    Idle,
+    Pending(SystemTime),
+    Firing(SystemTime),
+}
+
 struct Alert {
     metric: String,
-    fun: Box<dyn Fn(i64) -> bool>,
-    fired: Option<SystemTime>,
+    fun: Box<dyn Fn(f64) -> bool>,
+    state: AlertState,
     msg: String,
+    delay: Duration,
 }
 
 struct Alerting {
@@ -378,9 +388,7 @@ impl Alerting {
     fn new(cfg: &AlertSettings, alerter: Matrix) -> Result<Self> {
         let mut alerts = Vec::with_capacity(cfg.alerts.len());
         for a in cfg.alerts.iter() {
-            let val : i64 = a.check.chars().skip_while(|c| !c.is_digit(10))
-                .collect::<String>().parse().expect(
-                    "Failed to parse alert check expression from config");
+            let val : f64 = a.limit;
             alerts.push(
                 Alert {
                     metric: a.metric.clone(),
@@ -399,8 +407,9 @@ impl Alerting {
                         } else {
                             std::panic!("Failed to parse alert check expression from config");
                         },
-                    fired: None,
+                    state: AlertState::Idle,
                     msg: a.msg.clone(),
+                    delay: Duration::from_secs(a.delaysecs),
                 }
             )
         }
@@ -426,30 +435,41 @@ impl Alerting {
             let val = match data.get(&a.metric).expect(
                     &format!("Alert metric {0:?} not found in monitored data, fix your config", a.metric)
                   ) {
-                RegData::Watts(v) => *v as i64,
-                RegData::Percent(v) => *v as i64,
-                RegData::Hz(v) => *v as i64,
-                RegData::Volts(v) => *v as i64,
-                RegData::Bool(v) => *v as i64,
+                RegData::Watts(v) => *v as f64,
+                RegData::Percent(v) => *v as f64,
+                RegData::Hz(v) => *v as f64,
+                RegData::Volts(v) => *v as f64,
+                RegData::Bool(v) => *v as i64 as f64,
             };
-            match ((a.fun)(val), a.fired) {
-                (true, Some(t)) => 
-                    if tn > t + self.alert_timeout {
-                        a.fired = Some(tn);
+            match ((a.fun)(val), &a.state) {
+                (true, AlertState::Firing(t)) => 
+                    if tn > *t + self.alert_timeout {
+                        a.state = AlertState::Firing(tn);
                         let msg = format!("Realert: {0:?}, {1:?}={val:?}", a.msg, a.metric);
                         Self::alert(&mut self.alerter, &msg).await?
                     },
-                (true, None) => { 
-                        a.fired = Some(tn);
+                (true, AlertState::Pending(t)) => 
+                    if tn > *t + a.delay {
+                        a.state = AlertState::Firing(tn);
                         let msg = format!("Alert: {0:?}, {1:?}={val:?}", a.msg, a.metric);
                         Self::alert(&mut self.alerter, &msg).await?
                     },
-                (false, Some(_)) => {
-                        a.fired = None;
+                (true, AlertState::Idle) => {
+                        if a.delay == Duration::ZERO {
+                            a.state = AlertState::Firing(tn);
+                            let msg = format!("Alert: {0:?}, {1:?}={val:?}", a.msg, a.metric);
+                            Self::alert(&mut self.alerter, &msg).await?
+                        } else {
+                            a.state = AlertState::Pending(tn);
+                        };
+                    },
+                (false, AlertState::Firing(_)) => {
+                        a.state = AlertState::Idle;
                         let msg = format!("Alert Cleared: {0:?}, {1:?}={val:?}", a.msg, a.metric);
                         Self::alert(&mut self.alerter, &msg).await?
                     },
-                (false, None) => (),
+                (false, AlertState::Pending(_)) => { a.state = AlertState::Idle; },
+                (false, AlertState::Idle) => (),
             }
         }
         Ok(()) 
