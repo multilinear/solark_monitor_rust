@@ -257,7 +257,7 @@ struct MatrixSettings {
     passwd: String,
     server: String,
     allowed_users: Vec<String>,
-    room_check_cycles: i32,
+    room_check_secs: u64,
 }
 
 struct Matrix {
@@ -374,7 +374,7 @@ struct AlertDesc {
 struct AlertSettings {
     enable: bool,
     alerts: Vec<AlertDesc>,
-    alert_timeout_secs: u32,
+    alert_timeout_min: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -435,7 +435,7 @@ impl Alerting {
             enable: cfg.enable,
             alerter: alerter,
             alerts: alerts,
-            alert_timeout: Duration::from_secs(cfg.alert_timeout_secs.into()),
+            alert_timeout: Duration::from_secs(cfg.alert_timeout_min * 60),
             msgs: BTreeMap::new(),
         })
     }
@@ -565,7 +565,7 @@ async fn main() -> Result<()> {
     let settings : Settings = cfg.try_deserialize()?;
     println!("config is {settings:?}");
     println!();
-    let room_check_cycles = settings.matrix.room_check_cycles;
+    let room_check_secs = settings.matrix.room_check_secs;
     let mut solark = Solark::new(&settings.solark);
     let mut influx = Influx::new(&settings.influxdb);
     let mut alerting = Alerting::new(
@@ -589,10 +589,9 @@ async fn main() -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
     let names_list = solark.make_names_list();
     println!("Starting monitoring loop");
-    let mut i = 1;
+    let mut next_room_check = SystemTime::now() + Duration::from_secs(room_check_secs);
     // We need to start out with some values
     loop {
-        //println!("");
         interval.tick().await;
         let values = match solark.read_all().await {
             Ok(v) => v,
@@ -602,8 +601,7 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
-        //println!("values = {values:?}");
-        // Read the next set of values while we process the last set
+        // Write the point and alert at the same time
         let writef = influx.write_point(&values, &names_list);
         let alertingf = alerting.check(&values);
         let (write_res, alert_res) = tokio::join!(writef, alertingf);
@@ -622,12 +620,13 @@ async fn main() -> Result<()> {
             }
         }
         alerting.gc();
-        // Kinda hacky, this should be a persistant connection and
+        // TODO: Kinda hacky, this should be a persistant connection and
         // an async callback, but the API for it is weird
-        if room_check_cycles != 0 && i % room_check_cycles == 0 {
+        let tn = SystemTime::now();
+        if room_check_secs != 0 && tn > next_room_check {
             alerting.check_rooms().await?;
+            next_room_check = tn;
         }
-        i = i+1;
     }
 }
 

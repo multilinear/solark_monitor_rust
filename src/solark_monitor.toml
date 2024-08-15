@@ -40,18 +40,17 @@ server = "https://matrix.org"
 user = "<your bot user here>"
 passwd = "<your users' password here>"
 allowed_users = ["<your user>", "<your housemates user>"]
-# every 30 loops (5 minutes) check if we're in the right rooms
-# set to 0 to disable room checks entirely
-room_check_cycles = 30 
+# 5 minutes, 0 disables
+room_check_secs = 300
 
 [alerting]
 enable = true
 alerts = [
-  { metric = "Faults", msg = "Solark has Faults Go Check the screen", check = "=1" },
-  { metric = "Grid Live", msg = "Grid is down running on battery power", check = "=0" },
-  { metric = "Batt SOC", msg = "Battery is below 10%", check = "<10" },
-  { metric = "Batt SOC", msg = "Battery is below 20%", check = "<20" }
+  { metric = "Faults", msg = "Solark has Faults Go Check the screen", check = ">", limit=1, delaysecs=0 },
+  { metric = "Grid Live", msg = "Grid is down running on battery power", check = "<", limit=0, delaysecs=300 },
+  { metric = "Batt SOC", msg = "Battery is below 10%", check = "<", limit=10, delaysecs=0 },
+  { metric = "Batt SOC", msg = "Battery is below 20%", check = "<", limit=20, delaysecs=0 }
 ]
 
 # in minutes
-alert_timeout = 8540
+alert_timeout_min = 1440
