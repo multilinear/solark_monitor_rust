@@ -9,21 +9,17 @@ type Result<T> = core::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Debug)]
 enum RegData {
-    Error,
     Bool(bool),
     Watts(i16),
     Percent(u16),
     Hz(u16),
-    Volts(i16),
+    Volts(i16), // Stored at 10'ths of a volt, annoyingly
 }
 
 // We store the actual data in a vector
 // This way we can cache the index and avoid doing
 // tree lookups every cycle
 type SolarkData = Vec<RegData>;
-// Seperately we store an index into that vector
-type SolarkIndex = BTree<String, i64>;
-
 
 #[derive(Debug, Deserialize, Clone)]
 enum RegDataType {
@@ -59,11 +55,11 @@ struct Solark {
 
 impl Solark {
   fn new(cfg: &SolarkSettings) -> Self {
-      Self{
-        cfg: cfg.clone(),
-        serial: None,
-        ctx: None,
-      }
+    Self {
+      cfg: cfg.clone(),
+      serial: None,
+      ctx: None,
+    }
   }
 
   pub async fn connect(&mut self) -> Result<()> {
@@ -116,24 +112,13 @@ impl Solark {
      })
 	}
 
-  pub fn new_data() -> SolarkData {
-    let mut results = SolarkData::new();
-    for reg in &self.cfg.registers {
-        results.insert(reg.metric.clone(), Rc::new(RegData::Error));
-    }
-    return results;
-  }
-
-  pub async fn read_all(&mut self, &mut data: SolarkData) -> () {
+  pub async fn read_all(&mut self) -> Result<SolarkData> {
     self.connect().await?;
     // connect succeeded so ctx exists
     let ctx = &mut self.ctx.as_mut().unwrap();
-    // Sadly we can't parallelize this because self has to be borrowed as mutable
-    // It's probably good though, since that would be a threadsafety problem
-    // We can still do non-modbus stuff, like talk to influxdb, while awaiting
+    let mut results = Vec::with_capacity(self.cfg.registers.len());
     for reg in &self.cfg.registers {
-        let data = Solark::read_register(ctx, &reg).await?;
-        results.get(reg.metric, data);
+        results.push(Solark::read_register(ctx, &reg).await?);
     }
     Ok(results)
   }
@@ -148,6 +133,27 @@ impl Solark {
     }
     Ok(())
 	}
+
+  // Spits out an ordered list of the metric names
+  // This list has the same order as the result of read_all()
+  pub fn make_names_list(&self) -> Vec<String> {
+    let mut names = Vec::with_capacity(self.cfg.registers.len());
+    for reg in &self.cfg.registers {
+        names.push(reg.metric.clone());
+    }
+    return names;
+  }
+
+  // Returns a map from metric name to metric index
+  pub fn make_metric_lookup(&self) -> BTreeMap<String, usize> {
+    let mut lookup = BTreeMap::new();
+    let mut i = 0;
+    for reg in &self.cfg.registers {
+        lookup.insert(reg.metric.clone(), i);
+        i = i + 1;
+    }
+    lookup
+  }
 }
 
 //***************************** Influx **********************************
@@ -202,7 +208,7 @@ impl Influx {
         self.client = None;
         Ok(())
     }
-    async fn write_point(&mut self, data: &SolarkData) -> Result<()> {
+    async fn write_point(&mut self, data: &SolarkData, names: &Vec<String>) -> Result<()> {
         if !self.cfg.enable { return Ok(()); }
         // Automatically reconnect if we're not connected
         self.connect().await?;
@@ -215,7 +221,7 @@ impl Influx {
         let cfg = &self.cfg;
         // rust thinks cfg could escape scope, so we have to collect
         // the iterator rather than lazily evaluating.
-        let points: Vec<DataPoint> =  data.iter().map(|(metric, datum)| {
+        let points: Vec<DataPoint> =  std::iter::zip(names.iter(), data.iter()).map(|(metric, datum)| {
             let point = DataPoint::builder(metric);
             cfg.tags.iter().fold(
                 match datum {
@@ -352,7 +358,6 @@ impl Matrix {
         }
         Ok(())
     }
-    // TODO: we need stuff for accepting chat requests
 }
 
 //***************************** Alerts **********************************
@@ -380,7 +385,8 @@ enum AlertState {
 }
 
 struct Alert {
-    metric: String,
+    metric: String, // Useful for alert text
+    midx: usize, // Cached metric index to avoid lookups
     fun: Box<dyn Fn(f64) -> bool>,
     state: AlertState,
     msg: String,
@@ -396,13 +402,14 @@ struct Alerting {
 }
 
 impl Alerting {
-    fn new(cfg: &AlertSettings, alerter: Matrix) -> Result<Self> {
+    fn new(cfg: &AlertSettings, alerter: Matrix, metricmap: BTreeMap<String, usize>) -> Result<Self> {
         let mut alerts = Vec::with_capacity(cfg.alerts.len());
         for a in cfg.alerts.iter() {
             let val : f64 = a.limit;
             alerts.push(
                 Alert {
                     metric: a.metric.clone(),
+                    midx: *metricmap.get(&a.metric).expect("Metric name not found"),
                     fun: if a.check.starts_with(">=") {
                             Box::new(move |x| x >= val)
                         } else if a.check.starts_with("<=") {
@@ -443,14 +450,12 @@ impl Alerting {
             // This is a misconfiguration, so we want to crash
             // note that this will happen on the first run of "check"
             // so it won't surprise us when an alert fires or something
-            let val = match data.get(&a.metric).expect(
-                    &format!("Alert metric {0:?} not found in monitored data, fix your config", a.metric)
-                  ) {
-                RegData::Watts(v) => *v as f64,
-                RegData::Percent(v) => *v as f64,
-                RegData::Hz(v) => *v as f64,
-                RegData::Volts(v) => *v as f64,
-                RegData::Bool(v) => *v as i64 as f64,
+            let val = match data[a.midx] {
+                RegData::Watts(v) => v as f64,
+                RegData::Percent(v) => v as f64,
+                RegData::Hz(v) => v as f64,
+                RegData::Volts(v) => v as f64 / 10.0,
+                RegData::Bool(v) => v as i64 as f64,
             };
             match ((a.fun)(val), &a.state) {
                 (true, AlertState::Firing(t)) => 
@@ -562,9 +567,11 @@ async fn main() -> Result<()> {
     println!();
     let room_check_cycles = settings.matrix.room_check_cycles;
     let mut solark = Solark::new(&settings.solark);
-    let mut (solark_data, solark_index) = solark::new_solarkdata();
     let mut influx = Influx::new(&settings.influxdb);
-    let mut alerting = Alerting::new(&settings.alerting, Matrix::new(&settings.matrix))?;
+    let mut alerting = Alerting::new(
+        &settings.alerting,
+        Matrix::new(&settings.matrix),
+        solark.make_metric_lookup())?;
 
     // NOW we start actually doing stuff
     // The initial connection is to *try* and set things up
@@ -580,6 +587,7 @@ async fn main() -> Result<()> {
         };
     }
     let mut interval = tokio::time::interval(Duration::from_secs(solark.cfg.poll_secs as u64));
+    let names_list = solark.make_names_list();
     println!("Starting monitoring loop");
     let mut i = 1;
     // We need to start out with some values
@@ -596,7 +604,7 @@ async fn main() -> Result<()> {
         };
         //println!("values = {values:?}");
         // Read the next set of values while we process the last set
-        let writef = influx.write_point(&values);
+        let writef = influx.write_point(&values, &names_list);
         let alertingf = alerting.check(&values);
         let (write_res, alert_res) = tokio::join!(writef, alertingf);
         match write_res {
