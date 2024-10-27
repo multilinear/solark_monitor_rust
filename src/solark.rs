@@ -123,10 +123,11 @@ impl Solark {
   }
 
 	pub async fn disconnect(&mut self) -> Result<()> {
+    use tokio_modbus::prelude::Client;
     match &mut self.ctx {
       Some(ctx) => {
 	        println!("Disconnecting");
-          ctx.disconnect().await??;
+          ctx.disconnect().await?;
         },
       None => (),
     }
