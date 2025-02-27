@@ -6,13 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = {version="*", features=["rt-multi-thread"]}
-#tokio-modbus = {version="0.13.1", default-features=false, features=["rtu"]}
+tokio = {version="*", default-features=false, features=["rt-multi-thread"]}
 tokio-modbus = {version="*", default-features=false, features=["rtu"]}
-tokio-serial = "*"
-influxdb2 = "*"
-matrix-sdk = { git = "https://github.com/matrix-org/matrix-rust-sdk.git" }
-futures = "*"
+tokio-serial = {version="*", default-features=false}
+influxdb2 = {version="*", default-features=false}
+matrix-sdk = {version="*", default-features=false, features=["native-tls","e2e-encryption"]}
+#matrix-sdk = { git = "https://github.com/matrix-org/matrix-rust-sdk.git" }
+futures = {version="*", default-features=false}
 config = {version="*" , default-features=false, features=["async", "toml"]}
-serde = "*"
-chrono = {version="*", features=["now"]}
+serde = {version="*", default-features=false} 
+chrono = {version="*", default-features=false, features=["now"]}
